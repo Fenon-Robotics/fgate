@@ -108,6 +108,8 @@ class RTMDetOnnxDetector:
         self.provider_name = provider_name
         self.model_path = model_path
         self.model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        self.cache_dir = Path(config.cache_dir)
+        self._engine_verified = config.backend != "tensorrt"
         self.input = self.session.get_inputs()[0]
         self.output_names = [output.name for output in self.session.get_outputs()]
         first_dimension = self.input.shape[0]
@@ -122,7 +124,23 @@ class RTMDetOnnxDetector:
             "active_providers": self.session.get_providers(),
             "dynamic_batch": self.dynamic_batch,
             "input_shape": self.input.shape,
+            "engine_cache_verified": self._engine_verified,
         }
+
+    def _verify_tensorrt_engine(self) -> None:
+        if self._engine_verified:
+            return
+        engines = [
+            path
+            for path in self.cache_dir.rglob("*.engine")
+            if path.is_file() and path.stat().st_size > 0
+        ]
+        if not engines:
+            raise RuntimeError(
+                "TensorRT provider ran but produced no non-empty engine cache; "
+                "refusing an unverified provider path"
+            )
+        self._engine_verified = True
 
     def _preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, float, tuple[int, int]]:
         target_h, target_w = self.config.input_height, self.config.input_width
@@ -220,6 +238,7 @@ class RTMDetOnnxDetector:
                 outputs.append(
                     self.session.run(self.output_names, {self.input.name: tensor[None]})[0]
                 )
+        self._verify_tensorrt_engine()
         return [
             self._decode(output, ratio, frame_shape)
             for output, ratio, frame_shape in zip(outputs, ratios, frame_shapes, strict=True)

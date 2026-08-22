@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from qc_pipeline.detector import Detection, nms
+from qc_pipeline.detector import Detection, RTMDetOnnxDetector, nms
 from qc_pipeline.evidence import EvidenceSelector
 
 
@@ -25,3 +26,14 @@ def test_evidence_is_bounded_to_first_worst_last(tmp_path) -> None:
     written = selector.write(tmp_path, {"hands-visible"})
     assert len(written) == 3
     assert all(path.stat().st_size > 0 for _, path, _ in written)
+
+
+def test_tensorrt_path_requires_nonempty_engine_cache(tmp_path) -> None:
+    detector = object.__new__(RTMDetOnnxDetector)
+    detector.cache_dir = tmp_path
+    detector._engine_verified = False
+    with pytest.raises(RuntimeError, match="no non-empty engine cache"):
+        detector._verify_tensorrt_engine()
+    (tmp_path / "model.engine").write_bytes(b"engine")
+    detector._verify_tensorrt_engine()
+    assert detector._engine_verified

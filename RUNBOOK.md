@@ -19,7 +19,9 @@ constraint; scale with `runtime.processing_workers` and isolated inference
 sessions rather than claiming dynamic batching.
 
 Do not continue when `qc model build` reports CUDA, CPU, or a provider list that
-does not start with `TensorrtExecutionProvider`.
+does not start with `TensorrtExecutionProvider`. The first inference must also
+create a non-empty `.engine` artifact in the configured cache; provider presence
+without an engine artifact is rejected.
 
 ## 2. Prepare and validate a canary manifest
 
@@ -115,4 +117,3 @@ the entire 7,500-hour corpus.
 - Camera warning thresholds need Atlas-specific human calibration.
 - Semantic safety, PII, children, metadata, diversity, and open-vocabulary
   conditions are deliberately deferred.
-
