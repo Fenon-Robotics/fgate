@@ -1,0 +1,14 @@
+{
+  "profile": "atlas-v1",
+  "rules": [
+    {"id": "hands-visible", "signal": "hand.visibility_fraction", "operator": ">=", "threshold": 0.6, "severity": "reject"},
+    {"id": "extended-idle", "signal": "idle.fraction", "operator": "<=", "threshold": 0.5, "severity": "reject"},
+    {"id": "corrupt-video", "signal": "camera.corrupt", "operator": "==", "threshold": false, "severity": "reject"},
+    {"id": "black-covered", "signal": "camera.black_covered", "operator": "==", "threshold": false, "severity": "reject"},
+    {"id": "blur-warning", "signal": "camera.blur_fraction", "operator": "<=", "threshold": 0.2, "severity": "warn"},
+    {"id": "exposure-warning", "signal": "camera.exposure_fraction", "operator": "<=", "threshold": 0.2, "severity": "warn"},
+    {"id": "translation-shake-warning", "signal": "camera.shake_p95_translation", "operator": "<=", "threshold": 0.03, "severity": "warn"},
+    {"id": "rotation-shake-warning", "signal": "camera.shake_p95_rotation", "operator": "<=", "threshold": 5.0, "severity": "warn"}
+  ]
+}
+

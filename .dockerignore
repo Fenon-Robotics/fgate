@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+models
+work
+tests
+**/__pycache__
+*.onnx
+*.engine
+*.plan
+

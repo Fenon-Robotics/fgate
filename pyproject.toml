@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atlas-qc-pipeline"
+version = "0.1.0"
+description = "CLI-first, high-throughput QC pipeline for POV video"
+requires-python = ">=3.12"
+dependencies = [
+  "boto3>=1.35,<2",
+  "numpy>=2.0,<3",
+  "opencv-python-headless>=4.10,<5",
+  "pydantic>=2.8,<3",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+gpu = [
+  "onnxruntime-gpu>=1.20,<2; platform_system == 'Linux'",
+  "tensorrt-cu12>=10,<11; platform_system == 'Linux'",
+]
+cpu = ["onnxruntime>=1.20,<2"]
+dev = ["pytest>=8.3,<9", "ruff>=0.8,<1"]
+
+[project.scripts]
+qc = "qc_pipeline.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qc_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"] # Typer declares CLI metadata through function defaults.

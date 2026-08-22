@@ -1,0 +1,40 @@
+{
+  "schema_version": "qc-job-v1",
+  "job_id": "atlas-canary-20260822",
+  "source": {
+    "bucket": "source-videos",
+    "items": [
+      {
+        "item_id": "clip-0001",
+        "key": "capture/site-a/clip-0001.mp4",
+        "size_bytes": 123456789,
+        "etag": "replace-with-r2-etag",
+        "duration_seconds": 300.0,
+        "metadata": {"site": "site-a", "operator": "operator-01"}
+      }
+    ]
+  },
+  "target": {"bucket": "qc-reports", "prefix": "atlas/qc/"},
+  "detector": {
+    "model_path": "models/rtmdet-nano-hand.onnx",
+    "backend": "tensorrt",
+    "device_id": 0,
+    "input_height": 320,
+    "input_width": 320,
+    "score_threshold": 0.3,
+    "nms_threshold": 0.45,
+    "tile_fallback": true,
+    "tile_overlap": 0.15,
+    "cache_dir": "models/tensorrt-cache"
+  },
+  "sampling": {"hand_fps": 2.0, "camera_fps": 5.0, "frame_width": 640, "chunk_frames": 64},
+  "runtime": {
+    "max_staging_bytes": 64424509440,
+    "download_workers": 8,
+    "processing_workers": 1,
+    "upload_workers": 8,
+    "max_attempts": 3,
+    "target_corpus_hours": 7500.0
+  }
+}
+
