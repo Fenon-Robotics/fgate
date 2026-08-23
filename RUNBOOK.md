@@ -12,6 +12,16 @@ qc model fetch
 qc model build --backend tensorrt --device-id 0
 ```
 
+For a Python virtual environment outside the Docker image, make TensorRT's
+wheel-provided shared libraries visible first:
+
+```bash
+export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+```
+
+On CUDA 12 hosts, install the GPU extra with ONNX Runtime below 1.23. Newer
+ONNX Runtime GPU wheels target CUDA 13 and will fail to load the TensorRT EP.
+
 The model is the official OpenMMLab static batch-1 RTMDet-nano hand export at
 320x320. The fetch command verifies the published archive against the pinned
 SHA-256 before extracting `end2end.onnx`. Static batch-1 is an explicit current

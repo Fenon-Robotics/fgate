@@ -33,6 +33,11 @@ qc model fetch
 qc model build --backend tensorrt
 ```
 
+The CUDA 12 image requires ONNX Runtime GPU below 1.23; later wheels target
+CUDA 13. The Docker image exposes the `tensorrt_libs` package directory through
+`LD_LIBRARY_PATH`. For a non-container virtual environment, export its own
+`site-packages/tensorrt_libs` directory before invoking `qc`.
+
 The build command must report `TensorrtExecutionProvider` as the first active
 provider. Any missing provider or fallback is a hard error.
 
@@ -110,4 +115,3 @@ item result. Partial reports remain local and can be completed with `qc retry`.
 See [`RUNBOOK.md`](RUNBOOK.md) for GPU canary, throughput, recovery, and report
 acceptance checks. See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for
 the settled architecture and deferred work.
-
