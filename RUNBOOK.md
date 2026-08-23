@@ -40,6 +40,7 @@ Use exact source keys and identities. Start with 10-20 representative clips:
 - clearly acceptable active work;
 - hands absent or edge-cropped;
 - extended inactivity;
+- unusually fast hand motion and periodic/repetitive work;
 - black/covered footage;
 - corrupt media;
 - blur, bad exposure, and shake examples.
@@ -124,6 +125,9 @@ the entire 7,500-hour corpus.
 - The current hand checkpoint is static batch-1 and its training-data/weight
   commercial rights need review before external commercial distribution.
 - Fine-motor stationary work can challenge motion-derived idle detection.
-- Camera warning thresholds need Atlas-specific human calibration.
+- Hand speed and repetition are motion proxies, not semantic action labels;
+  calibrate them against accepted and rejected site footage before corpus scale.
+- Camera shake, hand-speed, and repetition thresholds need Atlas-specific
+  human calibration before corpus-scale rejection.
 - Semantic safety, PII, children, metadata, diversity, and open-vocabulary
   conditions are deliberately deferred.

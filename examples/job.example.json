@@ -28,6 +28,12 @@
     "cache_dir": "models/tensorrt-cache"
   },
   "sampling": {"hand_fps": 2.0, "camera_fps": 5.0, "frame_width": 640, "chunk_frames": 64},
+  "motion": {
+    "repetition_min_period_seconds": 1.5,
+    "repetition_max_period_seconds": 12.0,
+    "repetition_min_duration_seconds": 20.0,
+    "repetition_evidence_min_speed": 0.05
+  },
   "runtime": {
     "max_staging_bytes": 64424509440,
     "download_workers": 8,
@@ -37,4 +43,3 @@
     "target_corpus_hours": 7500.0
   }
 }
-

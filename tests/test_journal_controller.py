@@ -160,6 +160,9 @@ def test_controller_end_to_end_with_fake_r2(tmp_path) -> None:
     assert summary["status"] == "complete"
     assert report["schema_version"] == "qc-report-v1"
     assert len(report["items"]) == 1
+    metrics = report["items"][0]["metrics"]
+    assert "hand.motion_speed_p95" in metrics
+    assert "motion.repetition_score" in metrics
     assert ProgressJournal(run_dir / "progress.jsonl").latest()["one"]["status"] == "freed"
     assert not (run_dir / "items" / "one").exists()
     assert ("target", "qc/controller-test/report.json") in store.objects

@@ -11,7 +11,9 @@ SCHEMA_REPORT = "qc-report-v1"
 SUPPORTED_SIGNALS = frozenset(
     {
         "hand.visibility_fraction",
+        "hand.motion_speed_p95",
         "idle.fraction",
+        "motion.repetition_score",
         "camera.corrupt",
         "camera.black_covered",
         "camera.blur_fraction",
@@ -151,6 +153,20 @@ def atlas_v1_rules() -> list[RuleConfig]:
             severity=Severity.REJECT,
         ),
         RuleConfig(
+            id="hand-speed",
+            signal="hand.motion_speed_p95",
+            operator=Operator.LTE,
+            threshold=0.75,
+            severity=Severity.REJECT,
+        ),
+        RuleConfig(
+            id="repetitive-motion",
+            signal="motion.repetition_score",
+            operator=Operator.LTE,
+            threshold=0.85,
+            severity=Severity.REJECT,
+        ),
+        RuleConfig(
             id="corrupt-video",
             signal="camera.corrupt",
             operator=Operator.EQ,
@@ -179,18 +195,18 @@ def atlas_v1_rules() -> list[RuleConfig]:
             severity=Severity.WARN,
         ),
         RuleConfig(
-            id="translation-shake-warning",
+            id="translation-shake",
             signal="camera.shake_p95_translation",
             operator=Operator.LTE,
             threshold=0.03,
-            severity=Severity.WARN,
+            severity=Severity.REJECT,
         ),
         RuleConfig(
-            id="rotation-shake-warning",
+            id="rotation-shake",
             signal="camera.shake_p95_rotation",
             operator=Operator.LTE,
             threshold=5.0,
-            severity=Severity.WARN,
+            severity=Severity.REJECT,
         ),
     ]
 
@@ -236,6 +252,19 @@ class IdleConfig(StrictModel):
     hand_box_expansion: float = Field(default=0.25, ge=0, le=2)
 
 
+class MotionConfig(StrictModel):
+    repetition_min_period_seconds: float = Field(default=1.5, gt=0)
+    repetition_max_period_seconds: float = Field(default=12.0, gt=0)
+    repetition_min_duration_seconds: float = Field(default=20.0, gt=0)
+    repetition_evidence_min_speed: float = Field(default=0.05, ge=0)
+
+    @model_validator(mode="after")
+    def validate_period_range(self) -> MotionConfig:
+        if self.repetition_max_period_seconds <= self.repetition_min_period_seconds:
+            raise ValueError("repetition_max_period_seconds must exceed the minimum")
+        return self
+
+
 class UncertaintyConfig(StrictModel):
     replicates: int = Field(default=1000, ge=100, le=10000)
     block_seconds: float = Field(default=30.0, gt=0)
@@ -261,6 +290,7 @@ class QCJob(StrictModel):
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     camera: CameraConfig = Field(default_factory=CameraConfig)
     idle: IdleConfig = Field(default_factory=IdleConfig)
+    motion: MotionConfig = Field(default_factory=MotionConfig)
     uncertainty: UncertaintyConfig = Field(default_factory=UncertaintyConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 

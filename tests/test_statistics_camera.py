@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from qc_pipeline.camera import black_intervals, frame_quality, qualify_idle_runs
-from qc_pipeline.schemas import CameraConfig
-from qc_pipeline.statistics import temporal_block_bootstrap
+from qc_pipeline.camera import black_intervals, frame_quality, idle_observation, qualify_idle_runs
+from qc_pipeline.detector import Detection
+from qc_pipeline.schemas import CameraConfig, IdleConfig
+from qc_pipeline.statistics import temporal_block_bootstrap, temporal_repetition_score
 
 
 def test_bootstrap_is_deterministic_and_bounded() -> None:
@@ -63,3 +65,48 @@ def test_idle_runs_only_qualify_after_minimum_duration() -> None:
     )
     assert not any(value is True for value in short)
     assert short_intervals == []
+
+
+def test_p95_bootstrap_uses_requested_statistic() -> None:
+    metric = temporal_block_bootstrap(
+        [0.0] * 19 + [1.0],
+        sample_fps=2,
+        block_seconds=2,
+        replicates=100,
+        confidence=0.95,
+        seed=4,
+        statistic="p95",
+    )
+    assert metric.point == pytest.approx(0.05)
+
+
+def test_repetition_score_separates_periodic_random_and_short_timelines() -> None:
+    sample_fps = 2.0
+    periodic = np.tile([0.1, 0.5, 0.9, 0.5], 30).tolist()
+    random = np.random.default_rng(8).random(len(periodic)).tolist()
+    options = {
+        "sample_fps": sample_fps,
+        "min_period_seconds": 1.5,
+        "max_period_seconds": 8.0,
+        "min_duration_seconds": 20.0,
+    }
+    assert temporal_repetition_score(periodic, **options) > 0.9
+    assert temporal_repetition_score(random, **options) < 0.85
+    assert temporal_repetition_score(periodic[:20], **options) == 0.0
+
+
+def test_stabilized_hand_speed_is_higher_for_moving_foreground() -> None:
+    previous = np.zeros((180, 320, 3), dtype=np.uint8)
+    current = previous.copy()
+    previous[60:120, 80:140] = 255
+    current[60:120, 120:180] = 255
+    detection = Detection((115, 55, 185, 125), 0.9)
+    _, _, _, speed = idle_observation(
+        previous,
+        current,
+        [detection],
+        dt=0.5,
+        config=IdleConfig(),
+    )
+    assert speed is not None
+    assert speed > 0.05

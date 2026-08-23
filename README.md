@@ -9,8 +9,11 @@ The MVP intentionally covers the automated reasons with defensible signals:
 
 - hand visibility must be at least 60%;
 - extended idle time must be at most 50%;
+- p95 stabilized hand speed must be at most 0.75 frame diagonals/second;
+- periodic hand-motion repetition score must be at most 0.85;
 - corrupt and sustained black/covered video are rejected;
-- blur, exposure, and shaking are warnings pending human calibration.
+- excessive stabilized camera translation or rotation is rejected;
+- blur and exposure remain warnings pending human calibration.
 
 The reported 95% interval is conditional on the detector and sampled timeline.
 It is not a human-validated confidence interval for classifier correctness.
@@ -66,7 +69,9 @@ signals are:
 
 ```text
 hand.visibility_fraction
+hand.motion_speed_p95
 idle.fraction
+motion.repetition_score
 camera.corrupt
 camera.black_covered
 camera.blur_fraction

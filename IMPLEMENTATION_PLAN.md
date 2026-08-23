@@ -81,7 +81,8 @@ evidence without claiming human-validated model accuracy.
 - Invalid schemas or unknown signals fail before network or media work.
 - Bootstrap results are repeatable for the same job and observations.
 - Rule-boundary tests distinguish good, bad, and uncertain clips.
-- Corrupt/black media hard-fails; blur/exposure/shake remain warnings.
+- Corrupt/black media, excessive hand speed, repetitive motion, and camera
+  shake hard-fail; blur and exposure remain warnings.
 - Source drift, destination conflict, and interrupted runs are resumable and
   do not block unrelated items.
 - Local cleanup happens only after destination verification.

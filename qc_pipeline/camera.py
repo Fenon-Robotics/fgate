@@ -25,6 +25,7 @@ class MotionMetrics:
     translation_fraction: float
     rotation_degrees_per_second: float
     residual: np.ndarray
+    flow_speed_fraction_per_second: np.ndarray | None = None
 
 
 def _gray_360(frame: np.ndarray) -> np.ndarray:
@@ -54,7 +55,13 @@ def frame_quality(frame: np.ndarray, config: CameraConfig) -> FrameQuality:
     )
 
 
-def stabilized_motion(previous: np.ndarray, current: np.ndarray, dt: float) -> MotionMetrics:
+def stabilized_motion(
+    previous: np.ndarray,
+    current: np.ndarray,
+    dt: float,
+    *,
+    dense_flow: bool = False,
+) -> MotionMetrics:
     previous_gray = _gray_360(previous)
     current_gray = _gray_360(current)
     if previous_gray.shape != current_gray.shape:
@@ -85,10 +92,26 @@ def stabilized_motion(previous: np.ndarray, current: np.ndarray, dt: float) -> M
     diagonal = float(np.hypot(current_gray.shape[0], current_gray.shape[1]))
     translation = float(np.hypot(dx, dy) / max(diagonal, 1.0))
     angle = float(np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))) / max(dt, 1e-6)
+    flow_speed = None
+    if dense_flow:
+        flow = cv2.calcOpticalFlowFarneback(
+            aligned,
+            current_gray,
+            None,
+            pyr_scale=0.5,
+            levels=2,
+            winsize=15,
+            iterations=2,
+            poly_n=5,
+            poly_sigma=1.1,
+            flags=0,
+        )
+        flow_speed = np.linalg.norm(flow, axis=2) / max(diagonal * dt, 1e-6)
     return MotionMetrics(
         translation_fraction=translation,
         rotation_degrees_per_second=abs(angle),
         residual=residual,
+        flow_speed_fraction_per_second=flow_speed,
     )
 
 
@@ -99,10 +122,10 @@ def idle_observation(
     *,
     dt: float,
     config: IdleConfig,
-) -> tuple[bool | None, MotionMetrics, float]:
-    motion = stabilized_motion(previous, current, dt)
+) -> tuple[bool | None, MotionMetrics, float, float | None]:
+    motion = stabilized_motion(previous, current, dt, dense_flow=True)
     if not detections:
-        return None, motion, 0.0
+        return None, motion, 0.0, None
     residual = motion.residual
     source_h, source_w = current.shape[:2]
     scale_x = residual.shape[1] / source_w
@@ -125,11 +148,14 @@ def idle_observation(
     workspace[int(0.1 * h) :, int(0.1 * w) : int(0.9 * w)] = True
     workspace_activity = float(changed[workspace].mean())
     activity = max(hand_activity, workspace_activity)
+    hand_speed = None
+    if hand_pixels.any() and motion.flow_speed_fraction_per_second is not None:
+        hand_speed = float(np.quantile(motion.flow_speed_fraction_per_second[hand_pixels], 0.95))
     active = (
         hand_activity >= config.hand_activity_fraction
         or workspace_activity >= config.workspace_activity_fraction
     )
-    return not active, motion, activity
+    return not active, motion, activity, hand_speed
 
 
 def qualify_idle_runs(
