@@ -26,6 +26,13 @@ def main() -> None:
     parser.add_argument("--decode-backend", choices=("cpu", "nvdec"), default="nvdec")
     parser.add_argument("--chunk-frames", type=int, default=32)
     parser.add_argument("--baseline-results", type=Path)
+    parser.add_argument(
+        "--detector-backend", choices=("tensorrt-native", "tensorrt", "cuda", "cpu")
+    )
+    parser.add_argument("--detector-model", type=Path)
+    parser.add_argument("--detector-cache", type=Path)
+    parser.add_argument("--optimal-batch-size", type=int, default=16)
+    parser.add_argument("--max-batch-size", type=int, default=64)
     args = parser.parse_args()
 
     job = load_job(args.job)
@@ -38,6 +45,27 @@ def main() -> None:
                 }
             ),
             "runtime": job.runtime.model_copy(update={"processing_workers": args.lanes}),
+            "detector": job.detector.model_copy(
+                update={
+                    **(
+                        {"backend": args.detector_backend}
+                        if args.detector_backend is not None
+                        else {}
+                    ),
+                    **(
+                        {"model_path": str(args.detector_model)}
+                        if args.detector_model is not None
+                        else {}
+                    ),
+                    **(
+                        {"cache_dir": str(args.detector_cache)}
+                        if args.detector_cache is not None
+                        else {}
+                    ),
+                    "optimal_batch_size": args.optimal_batch_size,
+                    "max_batch_size": args.max_batch_size,
+                }
+            ),
         }
     )
     item_ids = args.item_ids.split(",")
