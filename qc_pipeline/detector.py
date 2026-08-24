@@ -55,11 +55,18 @@ class DetectorBatchService:
     def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
         if not frames:
             return []
-        future: Future[list[list[Detection]]] = Future()
-        self._queue.put(
-            _BatchRequest(frames=frames, future=future, enqueued_at=time.perf_counter())
-        )
-        return future.result()
+        futures: list[Future[list[list[Detection]]]] = []
+        for start in range(0, len(frames), self.max_batch_size):
+            future: Future[list[list[Detection]]] = Future()
+            self._queue.put(
+                _BatchRequest(
+                    frames=frames[start : start + self.max_batch_size],
+                    future=future,
+                    enqueued_at=time.perf_counter(),
+                )
+            )
+            futures.append(future)
+        return [detection for future in futures for detection in future.result()]
 
     def _run(self) -> None:
         while True:

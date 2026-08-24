@@ -68,6 +68,24 @@ def test_detector_service_batches_concurrent_video_requests() -> None:
     assert service.stats["mean_batch_size"] == 8.0
 
 
+def test_detector_service_splits_oversized_tile_request_in_order() -> None:
+    class OrderedDetector:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+            self.batch_sizes.append(len(frames))
+            return [[Detection((float(frame[0, 0, 0]), 0, 1, 1), 1.0)] for frame in frames]
+
+    detector = OrderedDetector()
+    service = DetectorBatchService(detector, max_batch_size=4, max_wait_ms=0)
+    frames = [np.full((1, 1, 3), index, dtype=np.uint8) for index in range(10)]
+    results = service.detect_batch(frames)
+    service.close()
+    assert detector.batch_sizes == [4, 4, 2]
+    assert [result[0].xyxy[0] for result in results] == list(range(10))
+
+
 def test_dynamic_raw_outputs_are_thresholded_and_nms_filtered() -> None:
     detector = object.__new__(RTMDetOnnxDetector)
     detector.config = DetectorConfig(backend="cpu", score_threshold=0.3, nms_threshold=0.45)
