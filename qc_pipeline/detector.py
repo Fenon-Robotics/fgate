@@ -152,16 +152,22 @@ class CentralBatchedDetector:
 
     @property
     def provenance(self) -> dict[str, object]:
+        primary = self._primary_detector.provenance
+        tile = self._tile_detector.provenance
         return {
-            **self._primary_detector.provenance,
+            **primary,
             "central_batching": True,
             "max_batch_size": self.primary.max_batch_size,
             "max_wait_ms": self.primary.max_wait_seconds * 1000.0,
             "full_queue": self.primary.stats,
             "tile_queue": self.tile.stats,
-            "true_model_batching": bool(
-                self._primary_detector.provenance.get("dynamic_batch", False)
+            "full_inference_calls": primary.get("inference_calls"),
+            "tile_inference_calls": tile.get("inference_calls"),
+            "total_inference_calls": sum(
+                int(value or 0)
+                for value in (primary.get("inference_calls"), tile.get("inference_calls"))
             ),
+            "true_model_batching": bool(primary.get("dynamic_batch", False)),
         }
 
     def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
