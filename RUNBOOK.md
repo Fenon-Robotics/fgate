@@ -8,6 +8,8 @@ Run on the target NVIDIA host before any R2-backed job:
 nvidia-smi
 df -h /work
 ffmpeg -hide_banner -version
+ffmpeg -hide_banner -hwaccels
+ffmpeg -hide_banner -decoders 2>/dev/null | grep cuvid
 qc model fetch
 qc model build --backend tensorrt --device-id 0
 ```
@@ -22,11 +24,18 @@ export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/tensorrt_libs:
 On CUDA 12 hosts, install the GPU extra with ONNX Runtime below 1.23. Newer
 ONNX Runtime GPU wheels target CUDA 13 and will fail to load the TensorRT EP.
 
-The model is the official OpenMMLab static batch-1 RTMDet-nano hand export at
-320x320. The fetch command verifies the published archive against the pinned
-SHA-256 before extracting `end2end.onnx`. Static batch-1 is an explicit current
-constraint; scale with `runtime.processing_workers` and isolated inference
-sessions rather than claiming dynamic batching.
+The default model is the official OpenMMLab static batch-1 RTMDet-nano hand
+export at 320x320. The fetch command verifies the published archive against the
+pinned SHA-256 before extracting `end2end.onnx`. The central detector queues
+frames across video lanes and records `true_model_batching=false` for this
+checkpoint. A parity-validated dynamic ONNX/TensorRT export uses true batches
+without changing the controller; never describe queued static calls as TensorRT
+batching.
+
+Set `sampling.decode_backend=nvdec` on the GPU host. The pipeline explicitly
+selects a CUVID decoder, resizes on CUDA, downloads one 5 FPS 640px stream, and
+derives the 2 FPS hand stream from it. An NVDEC error fails the clip; it never
+silently retries with CPU decode.
 
 Do not continue when `qc model build` reports CUDA, CPU, or a provider list that
 does not start with `TensorrtExecutionProvider`. The first inference must also
@@ -114,6 +123,14 @@ projected hours = target corpus hours / measured aggregate source xRT
 This is only valid for hardware, model cache, sampling, source codecs, transfer
 path, and concurrency represented by the canary. Measure GPU utilization,
 decoder utilization, CPU, disk, and R2 throughput before increasing workers.
+
+The run uses one system sampler at one-second intervals and reports GPU compute,
+NVDEC, GPU memory, and host CPU. Per-clip stage timers cover probe, decode/resize,
+camera quality, fused motion, detector, idle/hand speed, evidence selection,
+bootstrap, and rule evaluation. Controller timers cover evidence encoding,
+hashing, upload, result serialization, and cleanup. Sweep 8, 12, and 16
+`runtime.processing_workers`; keep the setting with the best xRT that does not
+increase errors or alter detector parity.
 
 Run one full-size unit after the small canary and validate it before committing
 the entire 7,500-hour corpus.

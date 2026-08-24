@@ -216,6 +216,7 @@ class SamplingConfig(StrictModel):
     camera_fps: float = Field(default=5.0, gt=0, le=30)
     frame_width: int = Field(default=640, ge=160, le=1920)
     chunk_frames: int = Field(default=64, ge=1, le=512)
+    decode_backend: Literal["cpu", "nvdec"] = "cpu"
 
 
 class DetectorConfig(StrictModel):
@@ -229,6 +230,8 @@ class DetectorConfig(StrictModel):
     tile_fallback: bool = True
     tile_overlap: float = Field(default=0.15, ge=0, lt=0.5)
     cache_dir: str = "models/tensorrt-cache"
+    max_batch_size: int = Field(default=32, ge=1, le=128)
+    batch_wait_ms: float = Field(default=4.0, ge=0, le=100)
 
 
 class CameraConfig(StrictModel):

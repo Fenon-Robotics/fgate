@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
-from qc_pipeline.detector import Detection, RTMDetOnnxDetector, nms
+from qc_pipeline.detector import Detection, DetectorBatchService, RTMDetOnnxDetector, nms
 from qc_pipeline.evidence import EvidenceSelector
 
 
@@ -37,3 +39,29 @@ def test_tensorrt_path_requires_nonempty_engine_cache(tmp_path) -> None:
     (tmp_path / "model.engine").write_bytes(b"engine")
     detector._verify_tensorrt_engine()
     assert detector._engine_verified
+
+
+def test_detector_service_batches_concurrent_video_requests() -> None:
+    class RecordingDetector:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        @property
+        def provenance(self) -> dict[str, object]:
+            return {"provider": "test", "dynamic_batch": True}
+
+        def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+            self.batch_sizes.append(len(frames))
+            return [[] for _ in frames]
+
+    detector = RecordingDetector()
+    service = DetectorBatchService(detector, max_batch_size=16, max_wait_ms=50)
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(service.detect_batch, [frame] * 4)
+        second = executor.submit(service.detect_batch, [frame] * 4)
+        assert len(first.result()) == 4
+        assert len(second.result()) == 4
+    service.close()
+    assert detector.batch_sizes == [8]
+    assert service.stats["mean_batch_size"] == 8.0

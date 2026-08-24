@@ -9,6 +9,7 @@ import numpy as np
 
 from .camera import (
     FrameQuality,
+    MotionMetrics,
     black_intervals,
     frame_quality,
     idle_observation,
@@ -18,7 +19,7 @@ from .camera import (
 from .detector import Detection, HandDetector, nms
 from .evidence import EvidenceSelector
 from .media import FrameSample, MediaError, iter_sampled_frames, probe
-from .profiling import GpuMonitor
+from .profiling import StageTimer, SystemMonitor
 from .rules import compare, evaluate_rules
 from .schemas import (
     Interval,
@@ -86,7 +87,8 @@ def detect_with_fallback(
             mapping.append((frame_index, x, y))
     if not tile_images:
         return full
-    tile_results = detector.detect_batch(tile_images)
+    tile_detector = getattr(detector, "detect_tiles_batch", detector.detect_batch)
+    tile_results = tile_detector(tile_images)
     for (frame_index, x, y), detections in zip(mapping, tile_results, strict=True):
         for detection in detections:
             x1, y1, x2, y2 = detection.xyxy
@@ -184,10 +186,13 @@ def process_video(
     item: SourceItem,
     job: QCJob,
     detector: HandDetector,
+    system_monitor: SystemMonitor | None = None,
 ) -> ProcessedItem:
     started = time.monotonic()
+    timer = StageTimer()
     try:
-        info = probe(path)
+        with timer.measure("probe"):
+            info = probe(path)
         analysis_fps = max(job.sampling.hand_fps, job.sampling.camera_fps)
         hand_period = 1.0 / job.sampling.hand_fps
         qualities: list[FrameQuality] = []
@@ -195,7 +200,6 @@ def process_video(
         translations: list[float] = []
         rotations: list[float] = []
         selector = EvidenceSelector()
-        previous_camera: FrameSample | None = None
         previous_hand: FrameSample | None = None
         hand_timestamps: list[float] = []
         hand_visible: list[bool] = []
@@ -207,17 +211,14 @@ def process_video(
             (float(rule.threshold) for rule in job.rules if rule.signal == "hand.motion_speed_p95"),
             float("inf"),
         )
-        provider = str(detector.provenance.get("provider", ""))
-        gpu_monitor = GpuMonitor(
-            job.detector.device_id,
-            enabled=provider not in {"", "CPUExecutionProvider", "static-test-double", "test"},
-        )
 
         def process_chunk(chunk: list[FrameSample]) -> None:
-            nonlocal previous_camera, previous_hand, next_hand_time, sampled_count
-            hand_samples: list[FrameSample] = []
+            nonlocal previous_hand, next_hand_time, sampled_count
+            hand_work: list[tuple[FrameSample, FrameSample | None, MotionMetrics | None]] = []
             for sample in chunk:
+                quality_started = time.perf_counter()
                 quality = frame_quality(sample.frame, job.camera)
+                timer.add("camera_quality", time.perf_counter() - quality_started)
                 qualities.append(quality)
                 quality_timestamps.append(sample.timestamp_seconds)
                 if quality.blackish:
@@ -252,41 +253,49 @@ def process_video(
                         sample.frame,
                         annotation={"clipped_fraction": quality.clipped_fraction},
                     )
-                if previous_camera is not None:
-                    dt = max(
-                        sample.timestamp_seconds - previous_camera.timestamp_seconds,
-                        1 / analysis_fps,
-                    )
-                    motion = stabilized_motion(previous_camera.frame, sample.frame, dt)
-                    translations.append(motion.translation_fraction)
-                    rotations.append(motion.rotation_degrees_per_second)
-                    if motion.translation_fraction > job.camera.shake_translation_threshold:
-                        selector.add(
-                            "translation-shake",
-                            sample.timestamp_seconds,
-                            motion.translation_fraction,
-                            sample.frame,
-                            annotation={"translation_fraction": motion.translation_fraction},
-                        )
-                    if motion.rotation_degrees_per_second > job.camera.shake_rotation_threshold:
-                        selector.add(
-                            "rotation-shake",
-                            sample.timestamp_seconds,
-                            motion.rotation_degrees_per_second,
-                            sample.frame,
-                            annotation={
-                                "rotation_degrees_per_second": (motion.rotation_degrees_per_second)
-                            },
-                        )
-                previous_camera = sample
                 if sample.timestamp_seconds + 1e-6 >= next_hand_time:
-                    hand_samples.append(sample)
+                    motion = None
+                    prior = previous_hand
+                    if prior is not None:
+                        dt = max(sample.timestamp_seconds - prior.timestamp_seconds, hand_period)
+                        motion_started = time.perf_counter()
+                        motion = stabilized_motion(prior.frame, sample.frame, dt)
+                        timer.add("fused_motion", time.perf_counter() - motion_started)
+                        translations.append(motion.translation_fraction)
+                        rotations.append(motion.rotation_degrees_per_second)
+                        if motion.translation_fraction > job.camera.shake_translation_threshold:
+                            selector.add(
+                                "translation-shake",
+                                sample.timestamp_seconds,
+                                motion.translation_fraction,
+                                sample.frame,
+                                annotation={"translation_fraction": motion.translation_fraction},
+                            )
+                        if motion.rotation_degrees_per_second > job.camera.shake_rotation_threshold:
+                            selector.add(
+                                "rotation-shake",
+                                sample.timestamp_seconds,
+                                motion.rotation_degrees_per_second,
+                                sample.frame,
+                                annotation={
+                                    "rotation_degrees_per_second": (
+                                        motion.rotation_degrees_per_second
+                                    )
+                                },
+                            )
+                    hand_work.append((sample, prior, motion))
+                    previous_hand = sample
                     next_hand_time += hand_period
 
+            detector_started = time.perf_counter()
             detections_by_frame = detect_with_fallback(
-                detector, [sample.frame for sample in hand_samples], job
+                detector, [sample.frame for sample, _, _ in hand_work], job
             )
-            for sample, detections in zip(hand_samples, detections_by_frame, strict=True):
+            timer.add("detector_total", time.perf_counter() - detector_started)
+            for (sample, prior, motion), detections in zip(
+                hand_work, detections_by_frame, strict=True
+            ):
+                evidence_started = time.perf_counter()
                 visible = bool(detections)
                 hand_timestamps.append(sample.timestamp_seconds)
                 hand_visible.append(visible)
@@ -294,21 +303,24 @@ def process_video(
                     selector.add(
                         "hands-visible", sample.timestamp_seconds, 1.0, sample.frame, detections=[]
                     )
-                if previous_hand is None:
+                if prior is None or motion is None:
                     raw_idle.append(False if visible else None)
                     hand_speeds.append(None)
                 else:
                     dt = max(
-                        sample.timestamp_seconds - previous_hand.timestamp_seconds,
+                        sample.timestamp_seconds - prior.timestamp_seconds,
                         hand_period,
                     )
+                    idle_started = time.perf_counter()
                     inactive, _, activity, hand_speed = idle_observation(
-                        previous_hand.frame,
+                        prior.frame,
                         sample.frame,
                         detections,
                         dt=dt,
                         config=job.idle,
+                        motion=motion,
                     )
+                    timer.add("idle_and_hand_speed", time.perf_counter() - idle_started)
                     raw_idle.append(inactive)
                     hand_speeds.append(hand_speed)
                     if inactive:
@@ -347,69 +359,75 @@ def process_video(
                                 "speed_frame_diagonals_per_second": hand_speed,
                             },
                         )
-                previous_hand = sample
+                timer.add("evidence_selection", time.perf_counter() - evidence_started)
             sampled_count += len(chunk)
 
-        gpu_monitor.start()
-        try:
-            chunk: list[FrameSample] = []
-            for sample in iter_sampled_frames(
-                path,
-                info,
-                fps=analysis_fps,
-                target_width=job.sampling.frame_width,
-            ):
-                chunk.append(sample)
-                if len(chunk) >= job.sampling.chunk_frames:
-                    process_chunk(chunk)
-                    chunk = []
-            if chunk:
-                process_chunk(chunk)
-        finally:
-            gpu_stats = gpu_monitor.stop()
-
-        qualified_idle, idle_intervals = qualify_idle_runs(
-            hand_timestamps, raw_idle, min_run_seconds=job.idle.min_run_seconds
-        )
-        black_failures = black_intervals(
-            quality_timestamps,
-            qualities,
+        chunk: list[FrameSample] = []
+        samples = iter_sampled_frames(
+            path,
+            info,
             fps=analysis_fps,
-            config=job.camera,
+            target_width=job.sampling.frame_width,
+            decode_backend=job.sampling.decode_backend,
         )
-        seed = deterministic_seed(job.job_id, item.item_id)
-        hand_metric = temporal_block_bootstrap(
-            hand_visible,
-            sample_fps=job.sampling.hand_fps,
-            block_seconds=job.uncertainty.block_seconds,
-            replicates=job.uncertainty.replicates,
-            confidence=job.uncertainty.confidence,
-            seed=seed,
-        )
-        idle_metric = temporal_block_bootstrap(
-            qualified_idle,
-            sample_fps=job.sampling.hand_fps,
-            block_seconds=job.uncertainty.block_seconds,
-            replicates=job.uncertainty.replicates,
-            confidence=job.uncertainty.confidence,
-            seed=seed ^ 0xA71A5,
-        )
-        speed_metric = temporal_block_bootstrap(
-            hand_speeds,
-            sample_fps=job.sampling.hand_fps,
-            block_seconds=job.uncertainty.block_seconds,
-            replicates=job.uncertainty.replicates,
-            confidence=job.uncertainty.confidence,
-            seed=seed ^ 0x5EED5,
-            statistic="p95",
-        )
-        repetition_score = temporal_repetition_score(
-            hand_speeds,
-            sample_fps=job.sampling.hand_fps,
-            min_period_seconds=job.motion.repetition_min_period_seconds,
-            max_period_seconds=job.motion.repetition_max_period_seconds,
-            min_duration_seconds=job.motion.repetition_min_duration_seconds,
-        )
+        while True:
+            decode_started = time.perf_counter()
+            try:
+                sample = next(samples)
+            except StopIteration:
+                timer.add("decode_and_gpu_resize", time.perf_counter() - decode_started)
+                break
+            timer.add("decode_and_gpu_resize", time.perf_counter() - decode_started)
+            chunk.append(sample)
+            if len(chunk) >= job.sampling.chunk_frames:
+                process_chunk(chunk)
+                chunk = []
+        if chunk:
+            process_chunk(chunk)
+
+        with timer.measure("statistics_bootstrap"):
+            qualified_idle, idle_intervals = qualify_idle_runs(
+                hand_timestamps, raw_idle, min_run_seconds=job.idle.min_run_seconds
+            )
+            black_failures = black_intervals(
+                quality_timestamps,
+                qualities,
+                fps=analysis_fps,
+                config=job.camera,
+            )
+            seed = deterministic_seed(job.job_id, item.item_id)
+            hand_metric = temporal_block_bootstrap(
+                hand_visible,
+                sample_fps=job.sampling.hand_fps,
+                block_seconds=job.uncertainty.block_seconds,
+                replicates=job.uncertainty.replicates,
+                confidence=job.uncertainty.confidence,
+                seed=seed,
+            )
+            idle_metric = temporal_block_bootstrap(
+                qualified_idle,
+                sample_fps=job.sampling.hand_fps,
+                block_seconds=job.uncertainty.block_seconds,
+                replicates=job.uncertainty.replicates,
+                confidence=job.uncertainty.confidence,
+                seed=seed ^ 0xA71A5,
+            )
+            speed_metric = temporal_block_bootstrap(
+                hand_speeds,
+                sample_fps=job.sampling.hand_fps,
+                block_seconds=job.uncertainty.block_seconds,
+                replicates=job.uncertainty.replicates,
+                confidence=job.uncertainty.confidence,
+                seed=seed ^ 0x5EED5,
+                statistic="p95",
+            )
+            repetition_score = temporal_repetition_score(
+                hand_speeds,
+                sample_fps=job.sampling.hand_fps,
+                min_period_seconds=job.motion.repetition_min_period_seconds,
+                max_period_seconds=job.motion.repetition_max_period_seconds,
+                min_duration_seconds=job.motion.repetition_min_duration_seconds,
+            )
         signals: dict[str, float | bool] = {
             "hand.visibility_fraction": hand_metric.point,
             "hand.motion_speed_p95": speed_metric.point,
@@ -431,7 +449,8 @@ def process_video(
             "hand.motion_speed_p95": speed_metric.interval,
             "idle.fraction": idle_metric.interval,
         }
-        verdict, rule_results, reasons = evaluate_rules(job.rules, signals, intervals)
+        with timer.measure("rule_evaluation"):
+            verdict, rule_results, reasons = evaluate_rules(job.rules, signals, intervals)
         good_probability = _good_probability(
             hand_metric.samples, idle_metric.samples, signals, job.rules
         )
@@ -463,16 +482,14 @@ def process_video(
                 },
                 "detector": detector.provenance,
                 "analysis_fps": analysis_fps,
-                "decode_backend": "ffmpeg-cpu-sampled",
+                "decode_backend": f"ffmpeg-{job.sampling.decode_backend}",
                 "elapsed_seconds": elapsed,
                 "source_xrt": duration / elapsed,
                 "sampled_fps": sampled_count / elapsed,
-                "gpu": {
-                    "samples": gpu_stats.samples,
-                    "peak_process_vram_mb": gpu_stats.peak_process_vram_mb,
-                    "mean_utilization_percent": gpu_stats.mean_gpu_utilization_percent,
-                    "peak_utilization_percent": gpu_stats.peak_gpu_utilization_percent,
-                },
+                "stage_timings": timer.snapshot(),
+                "system_monitor_snapshot": (
+                    system_monitor.as_dict() if system_monitor is not None else None
+                ),
             },
         )
         return ProcessedItem(result=result, evidence=selector, good_probability=good_probability)

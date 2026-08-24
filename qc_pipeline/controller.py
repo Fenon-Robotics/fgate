@@ -8,9 +8,10 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .detector import HandDetector, RTMDetOnnxDetector
+from .detector import CentralBatchedDetector, HandDetector, RTMDetOnnxDetector
 from .journal import ProgressJournal
 from .processor import ProcessedItem, process_video
+from .profiling import StageTimer, SystemMonitor
 from .report import build_report
 from .schemas import EvidenceReference, ItemResult, QCJob, SourceItem
 from .storage import (
@@ -76,6 +77,36 @@ class RunController:
         self.store = store or R2Store(env_file)
         self.detector_factory = detector_factory or (lambda: RTMDetOnnxDetector(job.detector))
         self._thread_local = threading.local()
+        self._detector_claim_lock = threading.Lock()
+        self._unclaimed_detector: HandDetector | None = None
+        self._central_detector: CentralBatchedDetector | None = None
+        self._detector_mode: dict[str, object] | None = None
+        if detector_factory is None:
+            primary = self.detector_factory()
+            if bool(primary.provenance.get("dynamic_batch", False)):
+                self._central_detector = CentralBatchedDetector(
+                    primary,
+                    self.detector_factory(),
+                    max_batch_size=job.detector.max_batch_size,
+                    max_wait_ms=job.detector.batch_wait_ms,
+                )
+            else:
+                # A static batch-1 checkpoint cannot become batched by putting a
+                # queue in front of it. Keep one context per active video lane
+                # until a parity-validated dynamic export is supplied.
+                self._unclaimed_detector = primary
+                self._detector_mode = {
+                    **primary.provenance,
+                    "central_batching": False,
+                    "true_model_batching": False,
+                    "reason": "static-batch-1-model",
+                    "configured_video_lanes": job.runtime.processing_workers,
+                }
+        self.system_monitor = SystemMonitor(
+            job.detector.device_id,
+            enabled=job.detector.backend != "cpu",
+        )
+        self.stage_timer = StageTimer()
         self._freeze_input()
 
     def _freeze_input(self) -> None:
@@ -89,9 +120,15 @@ class RunController:
         (self.run_dir / "job.sha256").write_text(source_hash + "\n", encoding="utf-8")
 
     def _detector(self) -> HandDetector:
+        if self._central_detector is not None:
+            return self._central_detector
         detector = getattr(self._thread_local, "detector", None)
         if detector is None:
-            detector = self.detector_factory()
+            with self._detector_claim_lock:
+                detector = self._unclaimed_detector
+                self._unclaimed_detector = None
+            if detector is None:
+                detector = self.detector_factory()
             self._thread_local.detector = detector
         return detector
 
@@ -131,18 +168,20 @@ class RunController:
         reasons = {
             result.rule_id for result in processed.result.rule_results if result.outcome != "pass"
         }
-        written = processed.evidence.write(item_dir / "evidence", reasons)
+        with self.stage_timer.measure("evidence_encode_and_hash"):
+            written = processed.evidence.write(item_dir / "evidence", reasons)
         evidence_refs: list[EvidenceReference] = []
         base = f"{self.job.target.prefix}{self.job.job_id}/items/{item.item_id}"
         for candidate, path, digest in written:
             key = f"{base}/evidence/{path.name}"
-            identity = self.store.upload_create_only(
-                self.job.target.bucket,
-                key,
-                path,
-                content_type="image/jpeg",
-                sha256=digest,
-            )
+            with self.stage_timer.measure("evidence_upload"):
+                identity = self.store.upload_create_only(
+                    self.job.target.bucket,
+                    key,
+                    path,
+                    content_type="image/jpeg",
+                    sha256=digest,
+                )
             evidence_refs.append(
                 EvidenceReference(
                     rule_id=candidate.reason,
@@ -156,16 +195,20 @@ class RunController:
             )
         processed.result.evidence = evidence_refs
         result_path = item_dir / "result.json"
-        result_path.write_text(processed.result.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        result_digest = sha256_file(result_path)
+        with self.stage_timer.measure("result_serialize_and_hash"):
+            result_path.write_text(
+                processed.result.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            )
+            result_digest = sha256_file(result_path)
         result_key = f"{base}/result.json"
-        self.store.upload_create_only(
-            self.job.target.bucket,
-            result_key,
-            result_path,
-            content_type="application/json",
-            sha256=result_digest,
-        )
+        with self.stage_timer.measure("result_upload"):
+            self.store.upload_create_only(
+                self.job.target.bucket,
+                result_key,
+                result_path,
+                content_type="application/json",
+                sha256=result_digest,
+            )
         self.journal.append(
             item.item_id,
             "result_uploaded",
@@ -173,7 +216,9 @@ class RunController:
             result_sha256=result_digest,
             evidence_count=len(evidence_refs),
         )
+        cleanup_started = time.perf_counter()
         shutil.rmtree(item_dir)
+        self.stage_timer.add("verified_cleanup", time.perf_counter() - cleanup_started)
         self.journal.append(
             item.item_id,
             "freed",
@@ -187,7 +232,13 @@ class RunController:
     def _process_one(self, item: SourceItem) -> ItemResult:
         source = self._source_path(item)
         self.journal.append(item.item_id, "processing")
-        processed = process_video(source, item, self.job, self._detector())
+        processed = process_video(
+            source,
+            item,
+            self.job,
+            self._detector(),
+            system_monitor=self.system_monitor,
+        )
         self.journal.append(
             item.item_id,
             "processed",
@@ -213,6 +264,7 @@ class RunController:
         )
 
     def run(self, *, retry_only: bool = False) -> tuple[Path, dict[str, object]]:
+        self.system_monitor.start()
         latest = self.journal.latest()
         selected: list[SourceItem] = []
         for item in self.job.source.items:
@@ -253,8 +305,25 @@ class RunController:
             if event.get("status") == "freed" and result_key:
                 payload = self.store.get_json(self.job.target.bucket, str(result_key))
                 results.append(ItemResult.model_validate(payload))
+        system_stats = self.system_monitor.stop()
+        if self._central_detector is not None:
+            detector_batching = self._central_detector.provenance
+            self._central_detector.close()
+        else:
+            detector_batching = self._detector_mode
         complete = len(results) == len(self.job.source.items)
         report = build_report(self.job, results, complete=complete)
+        report.provenance["system_monitor"] = {
+            "samples": system_stats.samples,
+            "mean_gpu_utilization_percent": system_stats.mean_gpu_utilization_percent,
+            "peak_gpu_utilization_percent": system_stats.peak_gpu_utilization_percent,
+            "mean_decoder_utilization_percent": system_stats.mean_decoder_utilization_percent,
+            "peak_decoder_utilization_percent": system_stats.peak_decoder_utilization_percent,
+            "peak_gpu_memory_mb": system_stats.peak_gpu_memory_mb,
+            "mean_cpu_utilization_percent": system_stats.mean_cpu_utilization_percent,
+        }
+        report.provenance["controller_stage_timings"] = self.stage_timer.snapshot()
+        report.provenance["detector_batching"] = detector_batching
         download_events = [
             event
             for event in self.journal.events()

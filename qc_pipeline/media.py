@@ -95,29 +95,57 @@ def iter_sampled_frames(
     *,
     fps: float,
     target_width: int,
+    decode_backend: str = "cpu",
 ) -> Iterator[FrameSample]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise MediaError("ffmpeg is required")
     width, height = _scaled_dimensions(info, target_width)
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(path),
-        "-an",
-        "-sn",
-        "-dn",
-        "-vf",
-        f"fps={fps:.8f},scale={width}:{height}:flags=fast_bilinear",
-        "-pix_fmt",
-        "bgr24",
-        "-f",
-        "rawvideo",
-        "pipe:1",
-    ]
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if decode_backend == "nvdec":
+        decoder = {
+            "h264": "h264_cuvid",
+            "hevc": "hevc_cuvid",
+            "av1": "av1_cuvid",
+            "vp8": "vp8_cuvid",
+            "vp9": "vp9_cuvid",
+            "mpeg4": "mpeg4_cuvid",
+        }.get(info.codec)
+        if decoder is None:
+            raise MediaError(f"NVDEC has no configured decoder for codec {info.codec!r}")
+        command.extend(
+            [
+                "-hwaccel",
+                "cuda",
+                "-hwaccel_output_format",
+                "cuda",
+                "-c:v",
+                decoder,
+            ]
+        )
+    elif decode_backend != "cpu":
+        raise MediaError(f"unsupported decode backend {decode_backend!r}")
+    command.extend(["-i", str(path), "-an", "-sn", "-dn"])
+    if decode_backend == "nvdec":
+        # Decode and resize once on the GPU. The 5 FPS host stream is the only
+        # hwdownload; the processor derives the lower-rate hand stream from it.
+        video_filter = (
+            f"scale_cuda={width}:{height}:format=nv12,"
+            f"hwdownload,format=nv12,fps={fps:.8f},format=bgr24"
+        )
+    else:
+        video_filter = f"fps={fps:.8f},scale={width}:{height}:flags=fast_bilinear"
+    command.extend(
+        [
+            "-vf",
+            video_filter,
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+    )
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None
     frame_bytes = width * height * 3
@@ -137,6 +165,8 @@ def iter_sampled_frames(
     stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
     return_code = process.wait()
     if return_code:
-        raise MediaError(f"ffmpeg decode failed: {stderr.strip()[:500]}")
+        raise MediaError(
+            f"ffmpeg {decode_backend} decode failed (no fallback attempted): {stderr.strip()[:500]}"
+        )
     if index == 0:
         raise MediaError("ffmpeg decoded zero sampled frames")

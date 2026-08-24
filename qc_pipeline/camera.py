@@ -25,7 +25,10 @@ class MotionMetrics:
     translation_fraction: float
     rotation_degrees_per_second: float
     residual: np.ndarray
-    flow_speed_fraction_per_second: np.ndarray | None = None
+    aligned_previous: np.ndarray
+    current_gray: np.ndarray
+    feature_points: np.ndarray | None = None
+    feature_speed_fraction_per_second: np.ndarray | None = None
 
 
 def _gray_360(frame: np.ndarray) -> np.ndarray:
@@ -59,8 +62,6 @@ def stabilized_motion(
     previous: np.ndarray,
     current: np.ndarray,
     dt: float,
-    *,
-    dense_flow: bool = False,
 ) -> MotionMetrics:
     previous_gray = _gray_360(previous)
     current_gray = _gray_360(current)
@@ -70,13 +71,20 @@ def stabilized_motion(
         previous_gray, maxCorners=200, qualityLevel=0.01, minDistance=8, blockSize=5
     )
     matrix = None
+    valid_previous: np.ndarray | None = None
+    valid_tracked: np.ndarray | None = None
     if points is not None and len(points) >= 6:
         tracked, status, _ = cv2.calcOpticalFlowPyrLK(previous_gray, current_gray, points, None)
         if tracked is not None and status is not None:
             valid = status.ravel().astype(bool)
             if int(valid.sum()) >= 6:
+                valid_previous = points[valid]
+                valid_tracked = tracked[valid]
                 matrix, _ = cv2.estimateAffinePartial2D(
-                    points[valid], tracked[valid], method=cv2.RANSAC, ransacReprojThreshold=3
+                    valid_previous,
+                    valid_tracked,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=3,
                 )
     if matrix is None:
         matrix = np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
@@ -92,26 +100,21 @@ def stabilized_motion(
     diagonal = float(np.hypot(current_gray.shape[0], current_gray.shape[1]))
     translation = float(np.hypot(dx, dy) / max(diagonal, 1.0))
     angle = float(np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))) / max(dt, 1e-6)
-    flow_speed = None
-    if dense_flow:
-        flow = cv2.calcOpticalFlowFarneback(
-            aligned,
-            current_gray,
-            None,
-            pyr_scale=0.5,
-            levels=2,
-            winsize=15,
-            iterations=2,
-            poly_n=5,
-            poly_sigma=1.1,
-            flags=0,
-        )
-        flow_speed = np.linalg.norm(flow, axis=2) / max(diagonal * dt, 1e-6)
+    feature_points = None
+    feature_speed = None
+    if valid_previous is not None and valid_tracked is not None:
+        camera_predicted = cv2.transform(valid_previous, matrix)
+        residual_vectors = valid_tracked.reshape(-1, 2) - camera_predicted.reshape(-1, 2)
+        feature_points = valid_tracked.reshape(-1, 2)
+        feature_speed = np.linalg.norm(residual_vectors, axis=1) / max(diagonal * dt, 1e-6)
     return MotionMetrics(
         translation_fraction=translation,
         rotation_degrees_per_second=abs(angle),
         residual=residual,
-        flow_speed_fraction_per_second=flow_speed,
+        aligned_previous=aligned,
+        current_gray=current_gray,
+        feature_points=feature_points,
+        feature_speed_fraction_per_second=feature_speed,
     )
 
 
@@ -122,8 +125,9 @@ def idle_observation(
     *,
     dt: float,
     config: IdleConfig,
+    motion: MotionMetrics | None = None,
 ) -> tuple[bool | None, MotionMetrics, float, float | None]:
-    motion = stabilized_motion(previous, current, dt, dense_flow=True)
+    motion = motion or stabilized_motion(previous, current, dt)
     if not detections:
         return None, motion, 0.0, None
     residual = motion.residual
@@ -149,8 +153,25 @@ def idle_observation(
     workspace_activity = float(changed[workspace].mean())
     activity = max(hand_activity, workspace_activity)
     hand_speed = None
-    if hand_pixels.any() and motion.flow_speed_fraction_per_second is not None:
-        hand_speed = float(np.quantile(motion.flow_speed_fraction_per_second[hand_pixels], 0.95))
+    if motion.feature_points is not None and motion.feature_speed_fraction_per_second is not None:
+        point_x = np.clip(motion.feature_points[:, 0].astype(int), 0, residual.shape[1] - 1)
+        point_y = np.clip(motion.feature_points[:, 1].astype(int), 0, residual.shape[0] - 1)
+        in_hand = hand_pixels[point_y, point_x]
+        if bool(in_hand.any()):
+            hand_speed = float(np.quantile(motion.feature_speed_fraction_per_second[in_hand], 0.95))
+    if hand_pixels.any():
+        ys, xs = np.nonzero(hand_pixels)
+        top, bottom = int(ys.min()), int(ys.max()) + 1
+        left, right = int(xs.min()), int(xs.max()) + 1
+        if bottom - top >= 8 and right - left >= 8:
+            shift, response = cv2.phaseCorrelate(
+                motion.aligned_previous[top:bottom, left:right].astype(np.float32),
+                motion.current_gray[top:bottom, left:right].astype(np.float32),
+            )
+            if response > 0.01:
+                diagonal = float(np.hypot(residual.shape[0], residual.shape[1]))
+                phase_speed = float(np.hypot(*shift) / max(diagonal * dt, 1e-6))
+                hand_speed = max(hand_speed or 0.0, phase_speed)
     active = (
         hand_activity >= config.hand_activity_fraction
         or workspace_activity >= config.workspace_activity_fraction

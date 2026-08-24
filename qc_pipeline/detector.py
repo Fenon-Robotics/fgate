@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import queue
+import threading
+import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -24,6 +28,144 @@ class HandDetector(Protocol):
     def provenance(self) -> dict[str, object]: ...
 
     def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]: ...
+
+
+@dataclass
+class _BatchRequest:
+    frames: list[np.ndarray]
+    future: Future[list[list[Detection]]]
+    enqueued_at: float
+
+
+class DetectorBatchService:
+    """Cross-video microbatcher with a single owner for an inference context."""
+
+    def __init__(self, detector: HandDetector, *, max_batch_size: int, max_wait_ms: float):
+        self.detector = detector
+        self.max_batch_size = max_batch_size
+        self.max_wait_seconds = max_wait_ms / 1000.0
+        self._queue: queue.Queue[_BatchRequest | None] = queue.Queue()
+        self._lock = threading.Lock()
+        self._batches = 0
+        self._frames = 0
+        self._queue_wait_seconds = 0.0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        if not frames:
+            return []
+        future: Future[list[list[Detection]]] = Future()
+        self._queue.put(
+            _BatchRequest(frames=frames, future=future, enqueued_at=time.perf_counter())
+        )
+        return future.result()
+
+    def _run(self) -> None:
+        while True:
+            first = self._queue.get()
+            if first is None:
+                return
+            requests = [first]
+            frame_count = len(first.frames)
+            deadline = first.enqueued_at + self.max_wait_seconds
+            while frame_count < self.max_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                try:
+                    request = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if request is None:
+                    self._queue.put(None)
+                    break
+                if frame_count + len(request.frames) > self.max_batch_size:
+                    self._queue.put(request)
+                    break
+                requests.append(request)
+                frame_count += len(request.frames)
+            flattened = [frame for request in requests for frame in request.frames]
+            started = time.perf_counter()
+            try:
+                detections = self.detector.detect_batch(flattened)
+                offset = 0
+                for request in requests:
+                    stop = offset + len(request.frames)
+                    request.future.set_result(detections[offset:stop])
+                    offset = stop
+            except BaseException as error:
+                for request in requests:
+                    request.future.set_exception(error)
+            finally:
+                with self._lock:
+                    self._batches += 1
+                    self._frames += len(flattened)
+                    self._queue_wait_seconds += sum(
+                        max(0.0, started - request.enqueued_at) for request in requests
+                    )
+
+    @property
+    def stats(self) -> dict[str, float | int]:
+        with self._lock:
+            return {
+                "batches": self._batches,
+                "frames": self._frames,
+                "mean_batch_size": self._frames / self._batches if self._batches else 0.0,
+                "mean_queue_wait_ms": (
+                    1000.0 * self._queue_wait_seconds / self._frames if self._frames else 0.0
+                ),
+                "pending_requests": self._queue.qsize(),
+            }
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=30)
+
+
+class CentralBatchedDetector:
+    """Two centralized queues: full-frame inference and tile fallback inference."""
+
+    def __init__(
+        self,
+        primary: HandDetector,
+        tile: HandDetector,
+        *,
+        max_batch_size: int,
+        max_wait_ms: float,
+    ):
+        self.primary = DetectorBatchService(
+            primary, max_batch_size=max_batch_size, max_wait_ms=max_wait_ms
+        )
+        self.tile = DetectorBatchService(
+            tile, max_batch_size=max_batch_size, max_wait_ms=max_wait_ms
+        )
+        self._primary_detector = primary
+        self._tile_detector = tile
+
+    @property
+    def provenance(self) -> dict[str, object]:
+        return {
+            **self._primary_detector.provenance,
+            "central_batching": True,
+            "max_batch_size": self.primary.max_batch_size,
+            "max_wait_ms": self.primary.max_wait_seconds * 1000.0,
+            "full_queue": self.primary.stats,
+            "tile_queue": self.tile.stats,
+            "true_model_batching": bool(
+                self._primary_detector.provenance.get("dynamic_batch", False)
+            ),
+        }
+
+    def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        return self.primary.detect_batch(frames)
+
+    def detect_tiles_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        return self.tile.detect_batch(frames)
+
+    def close(self) -> None:
+        self.primary.close()
+        self.tile.close()
 
 
 def _iou(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -114,9 +256,15 @@ class RTMDetOnnxDetector:
         self.output_names = [output.name for output in self.session.get_outputs()]
         first_dimension = self.input.shape[0]
         self.dynamic_batch = not isinstance(first_dimension, int) or first_dimension != 1
+        self._timing_lock = threading.Lock()
+        self._timing_seconds = {"preprocess": 0.0, "tensorrt": 0.0, "postprocess": 0.0}
+        self._inference_calls = 0
 
     @property
     def provenance(self) -> dict[str, object]:
+        with self._timing_lock:
+            timings = dict(self._timing_seconds)
+            inference_calls = self._inference_calls
         return {
             "model_path": str(self.model_path),
             "model_sha256": self.model_sha256,
@@ -125,6 +273,8 @@ class RTMDetOnnxDetector:
             "dynamic_batch": self.dynamic_batch,
             "input_shape": self.input.shape,
             "engine_cache_verified": self._engine_verified,
+            "stage_seconds": timings,
+            "inference_calls": inference_calls,
         }
 
     def _verify_tensorrt_engine(self) -> None:
@@ -225,24 +375,38 @@ class RTMDetOnnxDetector:
     def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
         if not frames:
             return []
+        preprocess_started = time.perf_counter()
         prepared = [self._preprocess(frame) for frame in frames]
         tensors = np.stack([item[0] for item in prepared])
         ratios = [item[1] for item in prepared]
         frame_shapes = [item[2] for item in prepared]
+        preprocess_seconds = time.perf_counter() - preprocess_started
         outputs: list[np.ndarray] = []
+        inference_started = time.perf_counter()
         if self.dynamic_batch:
             result = self.session.run(self.output_names, {self.input.name: tensors})[0]
             outputs = [result[index : index + 1] for index in range(len(frames))]
+            inference_calls = 1
         else:
             for tensor in tensors:
                 outputs.append(
                     self.session.run(self.output_names, {self.input.name: tensor[None]})[0]
                 )
+            inference_calls = len(tensors)
+        inference_seconds = time.perf_counter() - inference_started
         self._verify_tensorrt_engine()
-        return [
+        postprocess_started = time.perf_counter()
+        decoded = [
             self._decode(output, ratio, frame_shape)
             for output, ratio, frame_shape in zip(outputs, ratios, frame_shapes, strict=True)
         ]
+        postprocess_seconds = time.perf_counter() - postprocess_started
+        with self._timing_lock:
+            self._timing_seconds["preprocess"] += preprocess_seconds
+            self._timing_seconds["tensorrt"] += inference_seconds
+            self._timing_seconds["postprocess"] += postprocess_seconds
+            self._inference_calls += inference_calls
+        return decoded
 
 
 class StaticDetector:
