@@ -228,6 +228,26 @@ class RTMDetOnnxDetector:
                     "trt_fp16_enable": True,
                 }
             )
+            try:
+                import onnx
+
+                graph = onnx.load(model_path, load_external_data=False).graph
+                batch_dimension = graph.input[0].type.tensor_type.shape.dim[0]
+                model_dynamic = not batch_dimension.HasField("dim_value")
+            except ImportError as error:
+                raise RuntimeError("install the gpu/model extra for TensorRT profiles") from error
+            if model_dynamic:
+                prefix = f"{config.input_name}:"
+                suffix = f"x3x{config.input_height}x{config.input_width}"
+                provider_options.update(
+                    {
+                        "trt_profile_min_shapes": prefix + "1" + suffix,
+                        "trt_profile_opt_shapes": (
+                            prefix + str(config.optimal_batch_size) + suffix
+                        ),
+                        "trt_profile_max_shapes": prefix + str(config.max_batch_size) + suffix,
+                    }
+                )
         elif config.backend == "cuda":
             provider_name = "CUDAExecutionProvider"
         else:
@@ -254,6 +274,7 @@ class RTMDetOnnxDetector:
         self._engine_verified = config.backend != "tensorrt"
         self.input = self.session.get_inputs()[0]
         self.output_names = [output.name for output in self.session.get_outputs()]
+        self.raw_boxes_scores = set(self.output_names) == {"boxes", "scores"}
         first_dimension = self.input.shape[0]
         self.dynamic_batch = not isinstance(first_dimension, int) or first_dimension != 1
         self._timing_lock = threading.Lock()
@@ -272,6 +293,10 @@ class RTMDetOnnxDetector:
             "active_providers": self.session.get_providers(),
             "dynamic_batch": self.dynamic_batch,
             "input_shape": self.input.shape,
+            "output_layout": "raw-boxes-scores" if self.raw_boxes_scores else "end-to-end-nms",
+            "profile_min_batch": 1 if self.dynamic_batch else None,
+            "profile_opt_batch": (self.config.optimal_batch_size if self.dynamic_batch else None),
+            "profile_max_batch": self.config.max_batch_size if self.dynamic_batch else None,
             "engine_cache_verified": self._engine_verified,
             "stage_seconds": timings,
             "inference_calls": inference_calls,
@@ -372,6 +397,36 @@ class RTMDetOnnxDetector:
             for index in selected
         ]
 
+    def _decode_raw(
+        self,
+        boxes_output: np.ndarray,
+        scores_output: np.ndarray,
+        ratio: float,
+        frame_shape: tuple[int, int],
+    ) -> list[Detection]:
+        boxes = np.asarray(boxes_output, dtype=np.float32).reshape(-1, 4) / ratio
+        scores = np.asarray(scores_output, dtype=np.float32).reshape(-1)
+        candidates = np.flatnonzero(scores >= self.config.score_threshold)
+        if candidates.size:
+            candidates = candidates[
+                nms(boxes[candidates], scores[candidates], self.config.nms_threshold)
+            ]
+        candidates = candidates[np.argsort(scores[candidates])[::-1]]
+        frame_height, frame_width = frame_shape
+        return [
+            Detection(
+                xyxy=(
+                    float(np.clip(boxes[index, 0], 0.0, frame_width)),
+                    float(np.clip(boxes[index, 1], 0.0, frame_height)),
+                    float(np.clip(boxes[index, 2], 0.0, frame_width)),
+                    float(np.clip(boxes[index, 3], 0.0, frame_height)),
+                ),
+                score=float(scores[index]),
+                class_id=0,
+            )
+            for index in candidates
+        ]
+
     def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
         if not frames:
             return []
@@ -382,10 +437,18 @@ class RTMDetOnnxDetector:
         frame_shapes = [item[2] for item in prepared]
         preprocess_seconds = time.perf_counter() - preprocess_started
         outputs: list[np.ndarray] = []
+        raw_boxes: list[np.ndarray] = []
+        raw_scores: list[np.ndarray] = []
         inference_started = time.perf_counter()
         if self.dynamic_batch:
-            result = self.session.run(self.output_names, {self.input.name: tensors})[0]
-            outputs = [result[index : index + 1] for index in range(len(frames))]
+            result_values = self.session.run(self.output_names, {self.input.name: tensors})
+            if self.raw_boxes_scores:
+                result_by_name = dict(zip(self.output_names, result_values, strict=True))
+                raw_boxes = [result_by_name["boxes"][index] for index in range(len(frames))]
+                raw_scores = [result_by_name["scores"][index] for index in range(len(frames))]
+            else:
+                result = result_values[0]
+                outputs = [result[index : index + 1] for index in range(len(frames))]
             inference_calls = 1
         else:
             for tensor in tensors:
@@ -396,10 +459,18 @@ class RTMDetOnnxDetector:
         inference_seconds = time.perf_counter() - inference_started
         self._verify_tensorrt_engine()
         postprocess_started = time.perf_counter()
-        decoded = [
-            self._decode(output, ratio, frame_shape)
-            for output, ratio, frame_shape in zip(outputs, ratios, frame_shapes, strict=True)
-        ]
+        if self.raw_boxes_scores:
+            decoded = [
+                self._decode_raw(boxes, scores, ratio, frame_shape)
+                for boxes, scores, ratio, frame_shape in zip(
+                    raw_boxes, raw_scores, ratios, frame_shapes, strict=True
+                )
+            ]
+        else:
+            decoded = [
+                self._decode(output, ratio, frame_shape)
+                for output, ratio, frame_shape in zip(outputs, ratios, frame_shapes, strict=True)
+            ]
         postprocess_seconds = time.perf_counter() - postprocess_started
         with self._timing_lock:
             self._timing_seconds["preprocess"] += preprocess_seconds

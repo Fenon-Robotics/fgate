@@ -11,7 +11,15 @@ ffmpeg -hide_banner -version
 ffmpeg -hide_banner -hwaccels
 ffmpeg -hide_banner -decoders 2>/dev/null | grep cuvid
 qc model fetch
-qc model build --backend tensorrt --device-id 0
+qc model optimize \
+  --input models/rtmdet-nano-hand.onnx \
+  --output models/rtmdet-nano-hand-dynamic-raw.onnx
+qc model build \
+  --backend tensorrt \
+  --model models/rtmdet-nano-hand-dynamic-raw.onnx \
+  --optimal-batch-size 16 \
+  --max-batch-size 64 \
+  --device-id 0
 ```
 
 For a Python virtual environment outside the Docker image, make TensorRT's
@@ -24,13 +32,18 @@ export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/tensorrt_libs:
 On CUDA 12 hosts, install the GPU extra with ONNX Runtime below 1.23. Newer
 ONNX Runtime GPU wheels target CUDA 13 and will fail to load the TensorRT EP.
 
-The default model is the official OpenMMLab static batch-1 RTMDet-nano hand
-export at 320x320. The fetch command verifies the published archive against the
-pinned SHA-256 before extracting `end2end.onnx`. The central detector queues
-frames across video lanes and records `true_model_batching=false` for this
-checkpoint. A parity-validated dynamic ONNX/TensorRT export uses true batches
-without changing the controller; never describe queued static calls as TensorRT
-batching.
+The fetched model is the official OpenMMLab static batch-1 RTMDet-nano hand
+export at 320x320. The optimize command preserves the batched backbone and head,
+removes MMDeploy's intrinsically batch-1 TopK/NMS tail, and exposes decoded raw
+boxes and scores with a symbolic batch dimension. Thresholding and NMS then run
+per frame in the detector adapter. The build command creates a TensorRT profile
+for batch 1–64 optimized at 16. Provider provenance must report
+`dynamic_batch=true`, `output_layout=raw-boxes-scores`, and
+`true_model_batching=true` before calling the run genuinely batched.
+
+The static checkpoint remains supported for rollback, but it records
+`true_model_batching=false` and uses one TensorRT context per video lane. Never
+describe queued static calls as TensorRT batching.
 
 Set `sampling.decode_backend=nvdec` on the GPU host. The pipeline explicitly
 selects a CUVID decoder, resizes on CUDA, downloads one 5 FPS 640px stream, and

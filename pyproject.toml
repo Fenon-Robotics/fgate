@@ -20,8 +20,10 @@ gpu = [
   # ORT 1.23+ wheels target CUDA 13; the production image is CUDA 12.
   "onnxruntime-gpu>=1.20,<1.23; platform_system == 'Linux'",
   "tensorrt-cu12>=10,<11; platform_system == 'Linux'",
+  "onnx>=1.17,<2",
 ]
 cpu = ["onnxruntime>=1.20,<2"]
+model = ["onnx>=1.17,<2"]
 dev = ["pytest>=8.3,<9", "ruff>=0.8,<1"]
 
 [project.scripts]

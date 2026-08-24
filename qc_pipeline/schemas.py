@@ -231,7 +231,15 @@ class DetectorConfig(StrictModel):
     tile_overlap: float = Field(default=0.15, ge=0, lt=0.5)
     cache_dir: str = "models/tensorrt-cache"
     max_batch_size: int = Field(default=32, ge=1, le=128)
+    optimal_batch_size: int = Field(default=16, ge=1, le=128)
     batch_wait_ms: float = Field(default=4.0, ge=0, le=100)
+    input_name: str = "input"
+
+    @model_validator(mode="after")
+    def validate_batch_profile(self) -> DetectorConfig:
+        if self.optimal_batch_size > self.max_batch_size:
+            raise ValueError("optimal_batch_size cannot exceed max_batch_size")
+        return self
 
 
 class CameraConfig(StrictModel):

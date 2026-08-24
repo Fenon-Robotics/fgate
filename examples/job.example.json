@@ -16,7 +16,7 @@
   },
   "target": {"bucket": "qc-reports", "prefix": "atlas/qc/"},
   "detector": {
-    "model_path": "models/rtmdet-nano-hand.onnx",
+    "model_path": "models/rtmdet-nano-hand-dynamic-raw.onnx",
     "backend": "tensorrt",
     "device_id": 0,
     "input_height": 320,
@@ -27,6 +27,7 @@
     "tile_overlap": 0.15,
     "cache_dir": "models/tensorrt-cache",
     "max_batch_size": 64,
+    "optimal_batch_size": 16,
     "batch_wait_ms": 4.0
   },
   "sampling": {

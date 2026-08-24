@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from .controller import ControllerError, RunController, load_job
 from .detector import RTMDetOnnxDetector
 from .journal import ProgressJournal
+from .model_optimization import make_dynamic_rtmdet
 from .models import fetch_rtmdet_hand
 from .schemas import DetectorConfig
 
@@ -127,6 +128,8 @@ def model_build_command(
     device_id: int = typer.Option(0, "--device-id", min=0),
     input_height: int = typer.Option(320, "--input-height", min=128),
     input_width: int = typer.Option(320, "--input-width", min=128),
+    optimal_batch_size: int = typer.Option(16, "--optimal-batch-size", min=1, max=128),
+    max_batch_size: int = typer.Option(64, "--max-batch-size", min=1, max=128),
 ) -> None:
     """Create/warm an ONNX Runtime TensorRT engine cache on the target GPU."""
     try:
@@ -138,17 +141,45 @@ def model_build_command(
             input_height=input_height,
             input_width=input_width,
             tile_fallback=False,
+            optimal_batch_size=optimal_batch_size,
+            max_batch_size=max_batch_size,
         )
         detector = RTMDetOnnxDetector(config)
         dummy = np.zeros((input_height, input_width, 3), dtype=np.uint8)
-        detections = detector.detect_batch([dummy])[0]
+        warm_batch = optimal_batch_size if detector.dynamic_batch else 1
+        detections = detector.detect_batch([dummy] * warm_batch)
         _emit(
             {
                 "status": "ready",
                 "backend": backend,
                 "provenance": detector.provenance,
-                "dummy_detections": len(detections),
+                "warm_batch_size": warm_batch,
+                "dummy_detections": sum(len(value) for value in detections),
                 "cache_dir": str(cache_dir.resolve()),
+            }
+        )
+    except Exception as error:
+        _fail(error)
+
+
+@model_app.command("optimize")
+def model_optimize_command(
+    input_path: Path = typer.Option(..., "--input", exists=True, dir_okay=False),
+    output: Path = typer.Option(
+        Path("models/rtmdet-nano-hand-dynamic-raw.onnx"), "--output", dir_okay=False
+    ),
+) -> None:
+    """Convert the pinned MMDeploy RTMDet export to true dynamic raw outputs."""
+    try:
+        digest = make_dynamic_rtmdet(input_path, output)
+        _emit(
+            {
+                "status": "ready",
+                "path": str(output.resolve()),
+                "sha256": digest,
+                "input_shape": ["batch", 3, 320, 320],
+                "outputs": ["boxes", "scores"],
+                "parity_required": True,
             }
         )
     except Exception as error:

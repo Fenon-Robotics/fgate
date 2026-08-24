@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from qc_pipeline.rules import evaluate_rules
-from qc_pipeline.schemas import Interval, QCJob, Verdict, atlas_v1_rules
+from qc_pipeline.schemas import DetectorConfig, Interval, QCJob, Verdict, atlas_v1_rules
 
 
 def valid_payload() -> dict:
@@ -168,3 +168,8 @@ def test_definite_reject_does_not_mislabel_an_unknown_second_reason() -> None:
     )
     assert verdict == Verdict.BAD
     assert reasons == ["hands-visible"]
+
+
+def test_detector_batch_profile_is_ordered() -> None:
+    with pytest.raises(ValidationError, match="optimal_batch_size"):
+        DetectorConfig(optimal_batch_size=32, max_batch_size=16)

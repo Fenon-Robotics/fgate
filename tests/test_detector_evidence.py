@@ -7,6 +7,7 @@ import pytest
 
 from qc_pipeline.detector import Detection, DetectorBatchService, RTMDetOnnxDetector, nms
 from qc_pipeline.evidence import EvidenceSelector
+from qc_pipeline.schemas import DetectorConfig
 
 
 def test_nms_keeps_best_overlapping_box() -> None:
@@ -65,3 +66,15 @@ def test_detector_service_batches_concurrent_video_requests() -> None:
     service.close()
     assert detector.batch_sizes == [8]
     assert service.stats["mean_batch_size"] == 8.0
+
+
+def test_dynamic_raw_outputs_are_thresholded_and_nms_filtered() -> None:
+    detector = object.__new__(RTMDetOnnxDetector)
+    detector.config = DetectorConfig(backend="cpu", score_threshold=0.3, nms_threshold=0.45)
+    boxes = np.asarray(
+        [[10, 10, 100, 100], [12, 12, 98, 98], [150, 20, 220, 100]], dtype=np.float32
+    )
+    scores = np.asarray([[0.9], [0.8], [0.2]], dtype=np.float32)
+    detections = detector._decode_raw(boxes, scores, ratio=1.0, frame_shape=(180, 320))
+    assert len(detections) == 1
+    assert detections[0].score == pytest.approx(0.9)
