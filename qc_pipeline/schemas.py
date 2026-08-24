@@ -221,7 +221,7 @@ class SamplingConfig(StrictModel):
 
 class DetectorConfig(StrictModel):
     model_path: str = "models/rtmdet-nano-hand.onnx"
-    backend: Literal["tensorrt", "cuda", "cpu"] = "tensorrt"
+    backend: Literal["tensorrt-native", "tensorrt", "cuda", "cpu"] = "tensorrt"
     device_id: int = Field(default=0, ge=0)
     input_height: int = Field(default=320, ge=128, le=1280)
     input_width: int = Field(default=320, ge=128, le=1280)

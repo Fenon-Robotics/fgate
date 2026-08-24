@@ -33,7 +33,11 @@ cache on the target GPU:
 ```bash
 uv pip install -e '.[gpu]'
 qc model fetch
-qc model build --backend tensorrt
+qc model optimize --input models/rtmdet-nano-hand.onnx \
+  --output models/rtmdet-nano-hand-dynamic-raw.onnx
+qc model build --backend tensorrt-native \
+  --model models/rtmdet-nano-hand-dynamic-raw.onnx \
+  --optimal-batch-size 16 --max-batch-size 64
 ```
 
 The CUDA 12 image requires ONNX Runtime GPU below 1.23; later wheels target
@@ -41,8 +45,8 @@ CUDA 13. The Docker image exposes the `tensorrt_libs` package directory through
 `LD_LIBRARY_PATH`. For a non-container virtual environment, export its own
 `site-packages/tensorrt_libs` directory before invoking `qc`.
 
-The build command must report `TensorrtExecutionProvider` as the first active
-provider. Any missing provider or fallback is a hard error.
+The build command must report `TensorRTNative` as its only active provider and
+must report `true_model_batching=true`. Any fallback is a hard error.
 
 ## Commands
 
@@ -52,7 +56,8 @@ qc run --input JOB.json --env-file .env --work-root /work/qc-runs
 qc status --run /work/qc-runs/JOB_ID --json
 qc retry --run /work/qc-runs/JOB_ID --env-file .env --failed-only
 qc model fetch --output models/rtmdet-nano-hand.onnx
-qc model build --backend tensorrt --model models/rtmdet-nano-hand.onnx
+qc model optimize --input models/rtmdet-nano-hand.onnx --output models/rtmdet-nano-hand-dynamic-raw.onnx
+qc model build --backend tensorrt-native --model models/rtmdet-nano-hand-dynamic-raw.onnx
 ```
 
 `validate` performs no network, media, or GPU work. Long-running commands keep

@@ -10,7 +10,7 @@ import typer
 from pydantic import ValidationError
 
 from .controller import ControllerError, RunController, load_job
-from .detector import RTMDetOnnxDetector
+from .detector import build_native_tensorrt_engine, create_detector
 from .journal import ProgressJournal
 from .model_optimization import make_dynamic_rtmdet
 from .models import fetch_rtmdet_hand
@@ -120,7 +120,7 @@ def retry_command(
 
 @model_app.command("build")
 def model_build_command(
-    backend: str = typer.Option("tensorrt", "--backend"),
+    backend: str = typer.Option("tensorrt-native", "--backend"),
     model: Path = typer.Option(
         Path("models/rtmdet-nano-hand.onnx"), "--model", exists=True, dir_okay=False
     ),
@@ -131,7 +131,7 @@ def model_build_command(
     optimal_batch_size: int = typer.Option(16, "--optimal-batch-size", min=1, max=128),
     max_batch_size: int = typer.Option(64, "--max-batch-size", min=1, max=128),
 ) -> None:
-    """Create/warm an ONNX Runtime TensorRT engine cache on the target GPU."""
+    """Create and warm a strict TensorRT engine on the target GPU."""
     try:
         config = DetectorConfig(
             model_path=str(model),
@@ -144,7 +144,9 @@ def model_build_command(
             optimal_batch_size=optimal_batch_size,
             max_batch_size=max_batch_size,
         )
-        detector = RTMDetOnnxDetector(config)
+        if backend == "tensorrt-native":
+            build_native_tensorrt_engine(config)
+        detector = create_detector(config)
         dummy = np.zeros((input_height, input_width, 3), dtype=np.uint8)
         warm_batch = optimal_batch_size if detector.dynamic_batch else 1
         detections = detector.detect_batch([dummy] * warm_batch)

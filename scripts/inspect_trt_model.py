@@ -12,6 +12,7 @@ def main() -> None:
     parser.add_argument("--max-batch", type=int, default=32)
     parser.add_argument("--opt-batch", type=int, default=16)
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--engine-output", type=Path)
     args = parser.parse_args()
 
     import tensorrt as trt
@@ -54,7 +55,12 @@ def main() -> None:
     print(f"build_seconds={time.perf_counter() - started:.6f}", flush=True)
     if engine is None:
         raise SystemExit("TensorRT returned no serialized engine")
-    print(f"engine_bytes={len(engine)}", flush=True)
+    payload = bytes(engine)
+    print(f"engine_bytes={len(payload)}", flush=True)
+    if args.engine_output:
+        args.engine_output.parent.mkdir(parents=True, exist_ok=True)
+        args.engine_output.write_bytes(payload)
+        print(f"engine_path={args.engine_output}", flush=True)
 
 
 if __name__ == "__main__":

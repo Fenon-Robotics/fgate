@@ -15,7 +15,7 @@ qc model optimize \
   --input models/rtmdet-nano-hand.onnx \
   --output models/rtmdet-nano-hand-dynamic-raw.onnx
 qc model build \
-  --backend tensorrt \
+  --backend tensorrt-native \
   --model models/rtmdet-nano-hand-dynamic-raw.onnx \
   --optimal-batch-size 16 \
   --max-batch-size 64 \
@@ -38,7 +38,7 @@ removes MMDeploy's intrinsically batch-1 TopK/NMS tail, and exposes decoded raw
 boxes and scores with a symbolic batch dimension. Thresholding and NMS then run
 per frame in the detector adapter. The build command creates a TensorRT profile
 for batch 1–64 optimized at 16. Provider provenance must report
-`dynamic_batch=true`, `output_layout=raw-boxes-scores`, and
+`provider=TensorRTNative`, `dynamic_batch=true`, `output_layout=raw-boxes-scores`, and
 `true_model_batching=true` before calling the run genuinely batched.
 
 The static checkpoint remains supported for rollback, but it records
@@ -50,10 +50,10 @@ selects a CUVID decoder, resizes on CUDA, downloads one 5 FPS 640px stream, and
 derives the 2 FPS hand stream from it. An NVDEC error fails the clip; it never
 silently retries with CPU decode.
 
-Do not continue when `qc model build` reports CUDA, CPU, or a provider list that
-does not start with `TensorrtExecutionProvider`. The first inference must also
-create a non-empty `.engine` artifact in the configured cache; provider presence
-without an engine artifact is rejected.
+Do not continue when `qc model build` reports CUDA, CPU, ONNX Runtime, or any
+provider other than `TensorRTNative`. The first inference must also create a
+non-empty `.engine` artifact in the configured cache. The legacy
+`--backend tensorrt` mode remains only for the static batch-1 rollback.
 
 ## 2. Prepare and validate a canary manifest
 

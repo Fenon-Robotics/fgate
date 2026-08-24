@@ -17,7 +17,7 @@
   "target": {"bucket": "qc-reports", "prefix": "atlas/qc/"},
   "detector": {
     "model_path": "models/rtmdet-nano-hand-dynamic-raw.onnx",
-    "backend": "tensorrt",
+    "backend": "tensorrt-native",
     "device_id": 0,
     "input_height": 320,
     "input_width": 320,

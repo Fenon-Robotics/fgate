@@ -166,6 +166,10 @@ class CentralBatchedDetector:
     def close(self) -> None:
         self.primary.close()
         self.tile.close()
+        for detector in (self._primary_detector, self._tile_detector):
+            close = getattr(detector, "close", None)
+            if close is not None:
+                close()
 
 
 def _iou(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -478,6 +482,247 @@ class RTMDetOnnxDetector:
             self._timing_seconds["postprocess"] += postprocess_seconds
             self._inference_calls += inference_calls
         return decoded
+
+
+def _cuda_check(result: tuple[object, ...], operation: str) -> tuple[object, ...]:
+    error = result[0]
+    if int(error) != 0:
+        raise RuntimeError(f"{operation} failed with CUDA error {error}")
+    return result[1:]
+
+
+def _native_engine_identity(config: DetectorConfig) -> tuple[Path, dict[str, object]]:
+    try:
+        import tensorrt as trt
+        from cuda.bindings import runtime as cudart
+    except ImportError as error:
+        raise RuntimeError("install the gpu extra for native TensorRT") from error
+    model_path = Path(config.model_path)
+    if not model_path.is_file():
+        raise FileNotFoundError(f"RTMDet model not found: {model_path}")
+    _cuda_check(cudart.cudaSetDevice(config.device_id), "cudaSetDevice")
+    (properties,) = _cuda_check(
+        cudart.cudaGetDeviceProperties(config.device_id), "cudaGetDeviceProperties"
+    )
+    name_value = properties.name
+    gpu_name = (
+        bytes(name_value).split(b"\0", 1)[0].decode("utf-8", errors="replace")
+        if not isinstance(name_value, str)
+        else name_value
+    )
+    model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    identity = {
+        "model_sha256": model_sha256,
+        "tensorrt_version": trt.__version__,
+        "gpu_name": gpu_name,
+        "compute_capability": f"{properties.major}.{properties.minor}",
+        "input_height": config.input_height,
+        "input_width": config.input_width,
+        "profile_opt_batch": config.optimal_batch_size,
+        "profile_max_batch": config.max_batch_size,
+        "precision": "fp16",
+    }
+    digest = hashlib.sha256(repr(sorted(identity.items())).encode("utf-8")).hexdigest()[:24]
+    return Path(config.cache_dir) / f"rtmdet-{digest}.engine", identity
+
+
+def build_native_tensorrt_engine(config: DetectorConfig) -> tuple[Path, dict[str, object]]:
+    """Build a GPU/runtime/model-pinned TensorRT engine, or reuse an exact cache hit."""
+    import tensorrt as trt
+
+    engine_path, identity = _native_engine_identity(config)
+    engine_path.parent.mkdir(parents=True, exist_ok=True)
+    if engine_path.is_file() and engine_path.stat().st_size > 0:
+        return engine_path, identity
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(config.model_path):
+        errors = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+        raise RuntimeError(f"TensorRT failed to parse dynamic RTMDet ONNX: {errors}")
+    model_input = network.get_input(0)
+    if tuple(model_input.shape) != (-1, 3, config.input_height, config.input_width):
+        raise RuntimeError(f"native TensorRT requires dynamic NCHW input; got {model_input.shape}")
+    output_names = {network.get_output(i).name for i in range(network.num_outputs)}
+    if output_names != {"boxes", "scores"}:
+        raise RuntimeError(f"native TensorRT requires raw boxes/scores outputs; got {output_names}")
+    builder_config = builder.create_builder_config()
+    builder_config.set_flag(trt.BuilderFlag.FP16)
+    profile = builder.create_optimization_profile()
+    shape_suffix = (3, config.input_height, config.input_width)
+    if not profile.set_shape(
+        model_input.name,
+        (1, *shape_suffix),
+        (config.optimal_batch_size, *shape_suffix),
+        (config.max_batch_size, *shape_suffix),
+    ):
+        raise RuntimeError("TensorRT rejected the configured dynamic batch profile")
+    builder_config.add_optimization_profile(profile)
+    serialized = builder.build_serialized_network(network, builder_config)
+    if serialized is None:
+        raise RuntimeError("TensorRT returned no serialized engine")
+    payload = bytes(serialized)
+    temporary = engine_path.with_suffix(".engine.tmp")
+    temporary.write_bytes(payload)
+    temporary.replace(engine_path)
+    return engine_path, identity
+
+
+class TensorRTNativeDetector(RTMDetOnnxDetector):
+    """True dynamic-batch TensorRT 10 runtime without ONNX Runtime mediation."""
+
+    def __init__(self, config: DetectorConfig):
+        import tensorrt as trt
+        from cuda.bindings import runtime as cudart
+
+        if config.backend != "tensorrt-native":
+            raise ValueError("TensorRTNativeDetector requires backend='tensorrt-native'")
+        self.config = config
+        self.model_path = Path(config.model_path)
+        self.cache_dir = Path(config.cache_dir)
+        self.engine_path, self.engine_identity = build_native_tensorrt_engine(config)
+        self.model_sha256 = str(self.engine_identity["model_sha256"])
+        self.provider_name = "TensorRTNative"
+        self.dynamic_batch = True
+        self.raw_boxes_scores = True
+        self.output_names = ["boxes", "scores"]
+        self._timing_lock = threading.Lock()
+        self._timing_seconds = {"preprocess": 0.0, "tensorrt": 0.0, "postprocess": 0.0}
+        self._inference_calls = 0
+        self._cudart = cudart
+        self._trt = trt
+        self._logger = trt.Logger(trt.Logger.WARNING)
+        self._runtime = trt.Runtime(self._logger)
+        self._engine = self._runtime.deserialize_cuda_engine(self.engine_path.read_bytes())
+        if self._engine is None:
+            raise RuntimeError(f"failed to deserialize TensorRT engine {self.engine_path}")
+        self._context = self._engine.create_execution_context()
+        if self._context is None:
+            raise RuntimeError("failed to create TensorRT execution context")
+        (self._stream,) = _cuda_check(cudart.cudaStreamCreate(), "cudaStreamCreate")
+
+    @property
+    def provenance(self) -> dict[str, object]:
+        with self._timing_lock:
+            timings = dict(self._timing_seconds)
+            inference_calls = self._inference_calls
+        return {
+            "model_path": str(self.model_path),
+            "model_sha256": self.model_sha256,
+            "provider": self.provider_name,
+            "active_providers": [self.provider_name],
+            "dynamic_batch": True,
+            "true_model_batching": True,
+            "input_shape": ["batch", 3, self.config.input_height, self.config.input_width],
+            "output_layout": "raw-boxes-scores",
+            "profile_min_batch": 1,
+            "profile_opt_batch": self.config.optimal_batch_size,
+            "profile_max_batch": self.config.max_batch_size,
+            "engine_path": str(self.engine_path),
+            "engine_cache_verified": self.engine_path.is_file()
+            and self.engine_path.stat().st_size > 0,
+            "engine_identity": self.engine_identity,
+            "stage_seconds": timings,
+            "inference_calls": inference_calls,
+        }
+
+    def _infer(self, tensor: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        batch_size = len(tensor)
+        if batch_size > self.config.max_batch_size:
+            raise ValueError(
+                f"batch {batch_size} exceeds TensorRT profile max {self.config.max_batch_size}"
+            )
+        tensor = np.ascontiguousarray(tensor, dtype=np.float32)
+        if not self._context.set_input_shape(
+            self.config.input_name,
+            (batch_size, 3, self.config.input_height, self.config.input_width),
+        ):
+            raise RuntimeError("TensorRT rejected the runtime input shape")
+        host_outputs: dict[str, np.ndarray] = {}
+        allocations: list[int] = []
+        try:
+            (input_pointer,) = _cuda_check(
+                self._cudart.cudaMalloc(tensor.nbytes), "cudaMalloc(input)"
+            )
+            allocations.append(int(input_pointer))
+            _cuda_check(
+                self._cudart.cudaMemcpyAsync(
+                    input_pointer,
+                    tensor.ctypes.data,
+                    tensor.nbytes,
+                    self._cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                    self._stream,
+                ),
+                "cudaMemcpyAsync(H2D)",
+            )
+            if not self._context.set_tensor_address(self.config.input_name, int(input_pointer)):
+                raise RuntimeError("failed to bind TensorRT input")
+            for name in self.output_names:
+                shape = tuple(self._context.get_tensor_shape(name))
+                dtype = np.dtype(self._trt.nptype(self._engine.get_tensor_dtype(name)))
+                host = np.empty(shape, dtype=dtype)
+                (pointer,) = _cuda_check(
+                    self._cudart.cudaMalloc(host.nbytes), f"cudaMalloc({name})"
+                )
+                allocations.append(int(pointer))
+                if not self._context.set_tensor_address(name, int(pointer)):
+                    raise RuntimeError(f"failed to bind TensorRT output {name}")
+                host_outputs[name] = host
+            if not self._context.execute_async_v3(stream_handle=int(self._stream)):
+                raise RuntimeError("TensorRT execute_async_v3 returned false")
+            for name, pointer in zip(self.output_names, allocations[1:], strict=True):
+                host = host_outputs[name]
+                _cuda_check(
+                    self._cudart.cudaMemcpyAsync(
+                        host.ctypes.data,
+                        pointer,
+                        host.nbytes,
+                        self._cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                        self._stream,
+                    ),
+                    f"cudaMemcpyAsync({name} D2H)",
+                )
+            _cuda_check(self._cudart.cudaStreamSynchronize(self._stream), "cudaStreamSynchronize")
+            return host_outputs["boxes"], host_outputs["scores"]
+        finally:
+            for pointer in allocations:
+                _cuda_check(self._cudart.cudaFree(pointer), "cudaFree")
+
+    def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        if not frames:
+            return []
+        preprocess_started = time.perf_counter()
+        prepared = [self._preprocess(frame) for frame in frames]
+        tensors = np.stack([item[0] for item in prepared])
+        preprocess_seconds = time.perf_counter() - preprocess_started
+        inference_started = time.perf_counter()
+        boxes, scores = self._infer(tensors)
+        inference_seconds = time.perf_counter() - inference_started
+        postprocess_started = time.perf_counter()
+        decoded = [
+            self._decode_raw(boxes[index], scores[index], item[1], item[2])
+            for index, item in enumerate(prepared)
+        ]
+        postprocess_seconds = time.perf_counter() - postprocess_started
+        with self._timing_lock:
+            self._timing_seconds["preprocess"] += preprocess_seconds
+            self._timing_seconds["tensorrt"] += inference_seconds
+            self._timing_seconds["postprocess"] += postprocess_seconds
+            self._inference_calls += 1
+        return decoded
+
+    def close(self) -> None:
+        stream = getattr(self, "_stream", None)
+        if stream is not None:
+            _cuda_check(self._cudart.cudaStreamDestroy(stream), "cudaStreamDestroy")
+            self._stream = None
+
+
+def create_detector(config: DetectorConfig) -> HandDetector:
+    if config.backend == "tensorrt-native":
+        return TensorRTNativeDetector(config)
+    return RTMDetOnnxDetector(config)
 
 
 class StaticDetector:

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .detector import CentralBatchedDetector, HandDetector, RTMDetOnnxDetector
+from .detector import CentralBatchedDetector, HandDetector, create_detector
 from .journal import ProgressJournal
 from .processor import ProcessedItem, process_video
 from .profiling import StageTimer, SystemMonitor
@@ -75,7 +75,7 @@ class RunController:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.journal = ProgressJournal(run_dir / "progress.jsonl")
         self.store = store or R2Store(env_file)
-        self.detector_factory = detector_factory or (lambda: RTMDetOnnxDetector(job.detector))
+        self.detector_factory = detector_factory or (lambda: create_detector(job.detector))
         self._thread_local = threading.local()
         self._detector_claim_lock = threading.Lock()
         self._unclaimed_detector: HandDetector | None = None
