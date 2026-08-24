@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qc_pipeline.controller import load_job
-from qc_pipeline.detector import RTMDetOnnxDetector
+from qc_pipeline.detector import CentralBatchedDetector, HandDetector, create_detector
 from qc_pipeline.processor import process_video
 from qc_pipeline.profiling import SystemMonitor
 
@@ -44,11 +44,30 @@ def main() -> None:
     by_id = {item.item_id: item for item in job.source.items}
     items = [by_id[item_id] for item_id in item_ids]
     local = threading.local()
+    primary = create_detector(job.detector)
+    central: CentralBatchedDetector | None = None
+    unclaimed: HandDetector | None = primary
+    detector_lock = threading.Lock()
+    if bool(primary.provenance.get("dynamic_batch", False)):
+        central = CentralBatchedDetector(
+            primary,
+            create_detector(job.detector),
+            max_batch_size=job.detector.max_batch_size,
+            max_wait_ms=job.detector.batch_wait_ms,
+        )
+        unclaimed = None
 
-    def detector() -> RTMDetOnnxDetector:
+    def detector() -> HandDetector:
+        nonlocal unclaimed
+        if central is not None:
+            return central
         value = getattr(local, "detector", None)
         if value is None:
-            value = RTMDetOnnxDetector(job.detector)
+            with detector_lock:
+                value = unclaimed
+                unclaimed = None
+            if value is None:
+                value = create_detector(job.detector)
             local.detector = value
         return value
 
@@ -77,6 +96,9 @@ def main() -> None:
             results.append(future.result())
     wall_seconds = time.perf_counter() - wall_started
     system = monitor.stop()
+    detector_batching = central.provenance if central is not None else primary.provenance
+    if central is not None:
+        central.close()
 
     baseline = {}
     if args.baseline_results:
@@ -96,6 +118,7 @@ def main() -> None:
         "source_seconds": source_seconds,
         "aggregate_source_xrt": source_seconds / wall_seconds,
         "system_monitor": system.__dict__,
+        "detector_batching": detector_batching,
         "items": [],
     }
     for replica, result in sorted(results, key=lambda value: (value[1].item_id, value[0])):

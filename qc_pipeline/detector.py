@@ -551,12 +551,13 @@ def build_native_tensorrt_engine(config: DetectorConfig) -> tuple[Path, dict[str
     builder_config.set_flag(trt.BuilderFlag.FP16)
     profile = builder.create_optimization_profile()
     shape_suffix = (3, config.input_height, config.input_width)
-    if not profile.set_shape(
+    profile.set_shape(
         model_input.name,
         (1, *shape_suffix),
         (config.optimal_batch_size, *shape_suffix),
         (config.max_batch_size, *shape_suffix),
-    ):
+    )
+    if not profile:
         raise RuntimeError("TensorRT rejected the configured dynamic batch profile")
     builder_config.add_optimization_profile(profile)
     serialized = builder.build_serialized_network(network, builder_config)
