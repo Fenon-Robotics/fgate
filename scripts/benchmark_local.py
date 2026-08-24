@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--item-ids", required=True, help="comma-separated frozen item IDs")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lanes", type=int, default=3)
+    parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--decode-backend", choices=("cpu", "nvdec"), default="nvdec")
     parser.add_argument("--chunk-frames", type=int, default=32)
     parser.add_argument("--baseline-results", type=Path)
@@ -56,19 +57,24 @@ def main() -> None:
     wall_started = time.perf_counter()
     results = []
 
-    def run_item(item):
-        return process_video(
+    def run_item(item, replica: int):
+        processed = process_video(
             args.clips / f"{item.item_id}.mp4",
             item,
             job,
             detector(),
             monitor,
         )
+        return replica, processed.result
 
     with ThreadPoolExecutor(max_workers=args.lanes) as executor:
-        futures = {executor.submit(run_item, item): item for item in items}
+        futures = {
+            executor.submit(run_item, item, replica): (item, replica)
+            for replica in range(args.repeat)
+            for item in items
+        }
         for future in as_completed(futures):
-            results.append(future.result().result)
+            results.append(future.result())
     wall_seconds = time.perf_counter() - wall_started
     system = monitor.stop()
 
@@ -79,10 +85,11 @@ def main() -> None:
             if path.is_file():
                 baseline[item.item_id] = json.loads(path.read_text(encoding="utf-8"))
 
-    source_seconds = sum(result.duration_seconds for result in results)
+    source_seconds = sum(result.duration_seconds for _, result in results)
     payload = {
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "lanes": args.lanes,
+        "repeat": args.repeat,
         "decode_backend": args.decode_backend,
         "chunk_frames": args.chunk_frames,
         "wall_seconds": wall_seconds,
@@ -91,11 +98,12 @@ def main() -> None:
         "system_monitor": system.__dict__,
         "items": [],
     }
-    for result in sorted(results, key=lambda value: value.item_id):
+    for replica, result in sorted(results, key=lambda value: (value[1].item_id, value[0])):
         old = baseline.get(result.item_id)
         payload["items"].append(
             {
                 "item_id": result.item_id,
+                "replica": replica,
                 "verdict": result.verdict,
                 "reason_codes": result.reason_codes,
                 "metrics": result.metrics,
