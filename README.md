@@ -139,6 +139,36 @@ fgate undeploy config.yaml
 The versioned contract lives in
 [policies/standard.yaml](policies/standard.yaml):
 
+```yaml
+version: 1
+name: standard
+
+checks:
+  camera_covered:
+    reject_after_seconds: 5
+
+  hands_visible:
+    minimum_percent: 60
+
+  worker_idle:
+    maximum_percent: 50
+    minimum_segment_seconds: 10
+
+  camera_steadiness:
+    maximum_translation_percent: 3
+    maximum_rotation_degrees_per_second: 5
+
+  repetitive_motion:
+    maximum_score: 0.85
+
+warnings:
+  blurry:
+    maximum_percent: 20
+
+  bad_exposure:
+    maximum_percent: 20
+```
+
 | Signal | Standard limit | Result |
 | --- | ---: | --- |
 | Camera covered | Reject after 5 seconds | Hard check |
