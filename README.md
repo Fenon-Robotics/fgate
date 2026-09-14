@@ -16,7 +16,7 @@
   <a href="#features">Features</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#examples">Examples</a> ·
-  <a href="#example-contract">Example contract</a> ·
+  <a href="#example-policy-configuration">Policy config</a> ·
   <a href="#project-status">Status</a>
 </p>
 
@@ -58,6 +58,19 @@ Model paths, TensorRT, NVDEC, and GPU selection stay in
 
 ## Quickstart
 
+### Configure Fenon Gate
+
+Create `config.yaml`:
+
+```yaml
+version: 1
+backend: local
+policy: standard
+```
+
+This is the complete operator configuration. Model paths, inference backend,
+video decoder, and GPU selection remain in `docker-compose.yaml`.
+
 ### Requirements
 
 - Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/)
@@ -67,7 +80,7 @@ Model paths, TensorRT, NVDEC, and GPU selection stay in
 - approved dynamic hand model at the path mounted by
   [docker-compose.yaml](docker-compose.yaml)
 
-Install the CLI:
+### Install the CLI
 
 ```bash
 uv venv --python 3.12 .venv
@@ -75,15 +88,7 @@ uv pip install -e '.[dev,cpu]'
 source .venv/bin/activate
 ```
 
-The complete local configuration is:
-
-```yaml
-version: 1
-backend: local
-policy: standard
-```
-
-Start the API on the selected GPU:
+### Start the local API
 
 ```bash
 export FGATE_GPU_DEVICE=0
@@ -134,9 +139,9 @@ ETag and defines a create-only result destination.
 fgate undeploy config.yaml
 ```
 
-## Example contract
+## Example policy configuration
 
-The versioned contract lives in
+The versioned standard policy configuration lives in
 [policies/standard.yaml](policies/standard.yaml):
 
 ```yaml
@@ -211,14 +216,14 @@ confidence claim.
 
 ## Local and cloud
 
-| Backend | State | Contract |
+| Backend | State | Connection |
 | --- | --- | --- |
 | `local` | **Working; A10 validated** | CLI → Docker Compose → local API |
 | `cloud` | **Upcoming; not released** | CLI → authenticated HTTPS API |
 
-The cloud client contract reserves an endpoint and `FGATE_API_TOKEN`, but the
-managed API, ingress, model publication, and production rollout gates are not
-complete.
+The cloud client configuration reserves an endpoint and `FGATE_API_TOKEN`, but
+the managed API, ingress, model publication, and production rollout gates are
+not complete.
 
 ## Project status
 
