@@ -1,0 +1,3 @@
+version: 1
+backend: local
+policy: standard

@@ -33,7 +33,7 @@ def test_example_job_validates() -> None:
     job = QCJob.model_validate_json(path.read_text())
     assert job.schema_version == "qc-job-v1"
     assert job.source.items[0].etag == "replace-with-r2-etag"
-    assert job.target.prefix == "atlas/qc/"
+    assert job.target.prefix == "fenon-gate/"
 
 
 def test_unknown_signal_and_unsafe_key_fail() -> None:

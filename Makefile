@@ -1,4 +1,4 @@
-.PHONY: install test lint verify model
+.PHONY: install test lint typecheck verify
 
 install:
 	uv venv --python 3.12 .venv
@@ -11,8 +11,7 @@ lint:
 	.venv/bin/ruff format --check .
 	.venv/bin/ruff check .
 
-verify: lint test
+typecheck:
+	.venv/bin/mypy
 
-model:
-	.venv/bin/qc model fetch
-
+verify: lint typecheck test

@@ -46,6 +46,8 @@ class ObjectStore(Protocol):
 
     def get_json(self, bucket: str, key: str) -> dict[str, Any]: ...
 
+    def presign_get(self, bucket: str, key: str, *, expires_seconds: int = 3600) -> str: ...
+
 
 def read_env(path: Path) -> dict[str, str]:
     if not path.is_file():
@@ -126,6 +128,17 @@ class R2Store:
         except Exception as error:
             raise StorageError(f"R2 HEAD failed for {bucket}/{key}: {error}") from error
         return self._identity(bucket, key, response)
+
+    def presign_get(self, bucket: str, key: str, *, expires_seconds: int = 3600) -> str:
+        try:
+            value = self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=expires_seconds,
+            )
+        except Exception as error:
+            raise StorageError(f"R2 presign failed for {bucket}/{key}: {error}") from error
+        return str(value)
 
     def download(
         self,

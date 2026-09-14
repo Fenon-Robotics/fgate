@@ -1,6 +1,6 @@
 {
   "schema_version": "qc-job-v1",
-  "job_id": "atlas-canary-20260822",
+  "job_id": "fgate-canary-20260822",
   "source": {
     "bucket": "source-videos",
     "items": [
@@ -14,41 +14,5 @@
       }
     ]
   },
-  "target": {"bucket": "qc-reports", "prefix": "atlas/qc/"},
-  "detector": {
-    "model_path": "models/rtmdet-nano-hand-dynamic-raw.onnx",
-    "backend": "tensorrt-native",
-    "device_id": 0,
-    "input_height": 320,
-    "input_width": 320,
-    "score_threshold": 0.3,
-    "nms_threshold": 0.45,
-    "tile_fallback": true,
-    "tile_overlap": 0.15,
-    "cache_dir": "models/tensorrt-cache",
-    "max_batch_size": 64,
-    "optimal_batch_size": 16,
-    "batch_wait_ms": 4.0
-  },
-  "sampling": {
-    "hand_fps": 2.0,
-    "camera_fps": 5.0,
-    "frame_width": 640,
-    "chunk_frames": 32,
-    "decode_backend": "nvdec"
-  },
-  "motion": {
-    "repetition_min_period_seconds": 1.5,
-    "repetition_max_period_seconds": 12.0,
-    "repetition_min_duration_seconds": 20.0,
-    "repetition_evidence_min_speed": 0.05
-  },
-  "runtime": {
-    "max_staging_bytes": 64424509440,
-    "download_workers": 8,
-    "processing_workers": 12,
-    "upload_workers": 8,
-    "max_attempts": 3,
-    "target_corpus_hours": 7500.0
-  }
+  "target": {"bucket": "qc-reports", "prefix": "fenon-gate/"}
 }

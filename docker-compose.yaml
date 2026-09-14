@@ -1,0 +1,40 @@
+name: fenon-gate
+
+services:
+  fgate-api:
+    build: .
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      FGATE_MODEL_PATH: /models/rtmdet-nano-hand-dynamic-raw.onnx
+      FGATE_INFERENCE_BACKEND: tensorrt-native
+      FGATE_VIDEO_BACKEND: nvdec
+      FGATE_GPU_DEVICE: ${FGATE_GPU_DEVICE:-0}
+      FGATE_POLICY_DIR: /app/policies
+      FGATE_DATA_ROOT: /var/lib/fgate/jobs
+      NVIDIA_VISIBLE_DEVICES: ${FGATE_GPU_DEVICE:-0}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - ./models:/models:ro
+      - fgate-data:/var/lib/fgate
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${FGATE_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python3.12
+        - -c
+        - "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8787/readyz'))['ready']"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  fgate-data:

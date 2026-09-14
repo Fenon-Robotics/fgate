@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY qc_pipeline ./qc_pipeline
+COPY fgate ./fgate
+COPY policies ./policies
 RUN python3.12 -m pip install --break-system-packages --no-cache-dir '.[gpu]'
 
-ENTRYPOINT ["qc"]
+CMD ["python3.12", "-m", "uvicorn", "fgate.api:app", "--host", "0.0.0.0", "--port", "8787"]

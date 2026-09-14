@@ -10,6 +10,6 @@ __pycache__/
 *.plan
 models/
 work/
+fgate-results/
 dist/
 build/
-
