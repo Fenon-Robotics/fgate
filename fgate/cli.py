@@ -13,6 +13,8 @@ from .models import BackendMode, CheckRequest, JobState, QCReport
 from .policy import load_config
 
 app = typer.Typer(name="fgate", no_args_is_help=True)
+deploy_app = typer.Typer(name="deploy", no_args_is_help=True)
+app.add_typer(deploy_app, name="deploy")
 
 
 def _emit(value: object) -> None:
@@ -35,22 +37,22 @@ def _wait(backend: HttpQCBackend, job_id: str) -> QCReport:
         time.sleep(1)
 
 
-@app.command("deploy")
-def deploy(config_path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
+@deploy_app.command("start")
+def deploy_start(config_path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     mode, backend, _ = _backend(config_path)
     if mode != BackendMode.LOCAL:
-        raise typer.BadParameter("deploy is available only for local backend")
+        raise typer.BadParameter("deploy start is available only for local backend")
     compose_file = Path("docker-compose.yaml")
-    readiness = ComposeDeploymentBackend(compose_file, backend).deploy()
+    readiness = ComposeDeploymentBackend(compose_file, backend).start()
     _emit(readiness.model_dump(mode="json"))
 
 
-@app.command("undeploy")
-def undeploy(config_path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
+@deploy_app.command("stop")
+def deploy_stop(config_path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     mode, backend, _ = _backend(config_path)
     if mode != BackendMode.LOCAL:
-        raise typer.BadParameter("undeploy is available only for local backend")
-    ComposeDeploymentBackend(Path("docker-compose.yaml"), backend).undeploy()
+        raise typer.BadParameter("deploy stop is available only for local backend")
+    ComposeDeploymentBackend(Path("docker-compose.yaml"), backend).stop()
     _emit({"status": "stopped"})
 
 

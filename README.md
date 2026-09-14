@@ -92,7 +92,7 @@ source .venv/bin/activate
 
 ```bash
 export FGATE_GPU_DEVICE=0
-fgate deploy config.yaml
+fgate deploy start config.yaml
 ```
 
 Deployment succeeds only after the API reports the expected GPU, model,
@@ -136,7 +136,7 @@ ETag and defines a create-only result destination.
 ### Stop the local backend
 
 ```bash
-fgate undeploy config.yaml
+fgate deploy stop config.yaml
 ```
 
 ## Example policy configuration

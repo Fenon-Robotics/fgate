@@ -18,7 +18,7 @@ class ComposeDeploymentBackend(DeploymentBackend):
         self._compose_file = compose_file
         self._backend = backend
 
-    def deploy(self) -> Readiness:
+    def start(self) -> Readiness:
         self._preflight()
         self._run("up", "-d", "--wait")
         readiness = self._backend.readiness()
@@ -26,7 +26,7 @@ class ComposeDeploymentBackend(DeploymentBackend):
             raise DeploymentError(readiness.error or "fgate-api is not ready")
         return readiness
 
-    def undeploy(self) -> None:
+    def stop(self) -> None:
         self._run("down")
 
     def _preflight(self) -> None:

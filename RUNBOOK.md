@@ -7,7 +7,7 @@ Place the parity-validated dynamic RTMDet hand model at the path mounted by
 
 ```bash
 export FGATE_GPU_DEVICE=0
-fgate deploy config.yaml
+fgate deploy start config.yaml
 ```
 
 Deployment must fail unless Docker Compose, NVIDIA Container Toolkit, the

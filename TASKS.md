@@ -21,8 +21,8 @@ Audited: 2026-09-15
 
 - [x] `FG-001` Rename the public package and CLI to Fenon Gate and `fgate`.
   - Status: `DONE`
-  - Acceptance: package name is `fenon-gate`; CLI exposes `deploy`, `check`,
-    `status`, `batch`, and `undeploy`.
+  - Acceptance: package name is `fenon-gate`; CLI exposes `deploy start`,
+    `deploy stop`, `check`, `status`, and `batch`.
 
 - [x] `FG-002` Replace user-facing detector settings with minimal YAML.
   - Status: `DONE`
@@ -163,7 +163,7 @@ docker compose -f docker-compose.yaml config --quiet
 Run for every GPU, model, CUDA, TensorRT, or decoder change:
 
 ```bash
-fgate deploy config.yaml
+fgate deploy start config.yaml
 curl -fsS http://127.0.0.1:8787/readyz
 python scripts/compare_detector_parity.py --help
 ```
