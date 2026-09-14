@@ -16,7 +16,7 @@
   <a href="#features">Features</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#examples">Examples</a> ·
-  <a href="#qc-contract">QC contract</a> ·
+  <a href="#example-contract">Example contract</a> ·
   <a href="#project-status">Status</a>
 </p>
 
@@ -134,7 +134,7 @@ ETag and defines a create-only result destination.
 fgate undeploy config.yaml
 ```
 
-## QC contract
+## Example contract
 
 The versioned contract lives in
 [policies/standard.yaml](policies/standard.yaml):
