@@ -30,7 +30,7 @@ Model paths, TensorRT, NVDEC, and GPU selection stay in
 > A10. Managed cloud is upcoming and is not a released production feature.
 
 <p align="center">
-  <img src="docs/assets/fenon-gate-architecture.svg" alt="Fenon Gate system architecture" width="100%">
+  <img src="docs/assets/fenon-gate-architecture.jpg" alt="Fenon Gate system architecture" width="100%">
 </p>
 
 ## News
