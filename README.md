@@ -28,7 +28,9 @@ Model paths, TensorRT, NVDEC, and GPU selection stay in
 > [!IMPORTANT]
 > The local Docker Compose backend is implemented and validated on an NVIDIA
 > A10. Managed cloud is upcoming and is not a released production feature.
-
+<p align="center">
+  <img src="docs/assets/Frame 1.png" alt="Fenon Gate system architecture" width="100%">
+</p>
 <p align="center">
   <img src="docs/assets/fenon-gate-architecture.jpg" alt="Fenon Gate system architecture" width="100%">
 </p>
